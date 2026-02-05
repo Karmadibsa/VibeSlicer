@@ -217,12 +217,10 @@ def transcribe_and_burn(video_clip, original_filename):
     try:
         model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=CONFIG["DEVICE"], compute_type=CONFIG["COMPUTE_TYPE"])
     except Exception as e:
-        print_warn(f"GPU Load Failed: {e}. Switching to CPU/int8.")
-        try:
-            model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device="cpu", compute_type="int8")
-        except Exception as cpu_error:
-            print(f"{Fore.RED}[CRITICAL] Failed to load Whisper even on CPU: {cpu_error}{Style.RESET_ALL}")
-            raise cpu_error
+        print_warn(f"GPU Load Failed (CUDA missing?): {e}")
+        print_warn("Falling back to CPU (slower but works)...")
+        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device="cpu", compute_type="int8")
+
         
     segments, info = model.transcribe(temp_audio, word_timestamps=True)
     
