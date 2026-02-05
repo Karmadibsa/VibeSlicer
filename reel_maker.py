@@ -72,25 +72,26 @@ if os.name == 'nt':
     except:
         pass
 
-# FORCE IMAGEMAGICK CONFIGURATION FOR MOVIEPY
+# FORCE IMAGEMAGICK CONFIGURATION FOR MOVIEPY (RADICAL FIX)
 if os.name == 'nt':
-    try:
-        from moviepy.config_defaults import IMAGEMAGICK_BINARY
-        # Try to find specific path first
-        target_path = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
-        if os.path.exists(target_path):
-            os.environ["IMAGEMAGICK_BINARY"] = target_path
-            # Also monkey-patch moviepy if already imported
+    # Explicitly check for the installed version we know exists
+    target_im = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
+    if os.path.exists(target_im):
+        # 1. Set Environment Variable
+        os.environ["IMAGEMAGICK_BINARY"] = target_im
+        
+        # 2. Force-inject into moviepy.config_defaults if it is already loaded or will be loaded
+        try:
             import moviepy.config_defaults
-            moviepy.config_defaults.IMAGEMAGICK_BINARY = target_path
-        else:
-             # Fallback search
-            from shutil import which
-            im_path = which("magick")
-            if im_path:
-                os.environ["IMAGEMAGICK_BINARY"] = im_path
-    except:
-        pass
+            moviepy.config_defaults.IMAGEMAGICK_BINARY = target_im
+        except ImportError:
+            pass
+            
+        # 3. Create a temporary config setup for this run
+        # MoviePy sometimes checks for valid binary on import. 
+    else:
+        print_warn("ImageMagick not found at expected path. Trying 'magick' in PATH...")
+        os.environ["IMAGEMAGICK_BINARY"] = "magick"
 
 # ==================================================================================
 # 1. CONFIGURATION
