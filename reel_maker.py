@@ -269,25 +269,35 @@ def transcribe_and_burn(video_clip, original_filename):
     # Fix for 'CompositeAudioClip has no fps': specify fps (e.g., 44100)
     video_clip.audio.write_audiofile(temp_audio, fps=44100, logger=None)
     
-    # Load Whisper
-    print_info(f"Loading Whisper ({CONFIG['WHISPER_MODEL_SIZE']}) on {CONFIG['DEVICE']}...")
+    words_data = []
+    
+    # Define a helper to run transcription and capture ALL errors (init or execution)
+    def run_transcription_safe(device_type, compute_type):
+        print_info(f"Attempting transcription on {device_type}...")
+        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=device_type, compute_type=compute_type)
+        segs, _ = model.transcribe(temp_audio, word_timestamps=True)
+        # Force iteration to ensure it works (DLLs load here often)
+        return list(segs)
+
     try:
-        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=CONFIG["DEVICE"], compute_type=CONFIG["COMPUTE_TYPE"])
+        # 1. Try Configured Device (likely CUDA)
+        segments_list = run_transcription_safe(CONFIG["DEVICE"], CONFIG["COMPUTE_TYPE"])
     except:
         import traceback
         traceback.print_exc()
-        print_warn(f"GPU Load Failed. Switching to CPU.")
-        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device="cpu", compute_type="int8")
+        print_warn("GPU Transcription Failed (DLL or Version mismatch). Switching to CPU.")
+        try:
+            # 2. Fallback to CPU
+            segments_list = run_transcription_safe("cpu", "int8")
+        except Exception as cpu_e:
+            print(f"{Fore.RED}[CRITICAL] CPU Transcription also failed: {cpu_e}{Style.RESET_ALL}")
+            raise cpu_e
 
-        
-    segments, info = model.transcribe(temp_audio, word_timestamps=True)
-    
-    # Accumulate words
-    words_data = []
-    for s in segments:
+    # Process segments
+    for s in segments_list:
         for w in s.words:
-            words_data.append({
-                "start": w.start,
+                words_data.append({
+                    "start": w.start,
                 "end": w.end,
                 "word": w.word.strip()
             })
