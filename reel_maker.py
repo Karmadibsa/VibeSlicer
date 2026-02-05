@@ -26,8 +26,8 @@ if os.name == 'nt':
         else:
             # Check common paths
             common_paths = [
-                r"C:\Program Files\ImageMagick-7.1.3-Q16-HDRI\magick.exe",
                 r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe",
+                r"C:\Program Files\ImageMagick-7.1.3-Q16-HDRI\magick.exe",
                 r"C:\Program Files\ImageMagick-7.1.1-Q16-HDRI\magick.exe",
             ]
             for p in common_paths:
