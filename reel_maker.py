@@ -72,25 +72,23 @@ if os.name == 'nt':
     except:
         pass
 
-# DETECT IMAGEMAGICK (CRITICAL FOR TEXTCLIPS)
+# FORCE IMAGEMAGICK CONFIGURATION FOR MOVIEPY
 if os.name == 'nt':
     try:
-        # Try finding it in path
-        from shutil import which
-        im_path = which("magick")
-        if im_path:
-            os.environ["IMAGEMAGICK_BINARY"] = im_path
+        from moviepy.config_defaults import IMAGEMAGICK_BINARY
+        # Try to find specific path first
+        target_path = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
+        if os.path.exists(target_path):
+            os.environ["IMAGEMAGICK_BINARY"] = target_path
+            # Also monkey-patch moviepy if already imported
+            import moviepy.config_defaults
+            moviepy.config_defaults.IMAGEMAGICK_BINARY = target_path
         else:
-            # Check common paths
-            common_paths = [
-                r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe",
-                r"C:\Program Files\ImageMagick-7.1.3-Q16-HDRI\magick.exe",
-                r"C:\Program Files\ImageMagick-7.1.1-Q16-HDRI\magick.exe",
-            ]
-            for p in common_paths:
-                if os.path.exists(p):
-                    os.environ["IMAGEMAGICK_BINARY"] = p
-                    break
+             # Fallback search
+            from shutil import which
+            im_path = which("magick")
+            if im_path:
+                os.environ["IMAGEMAGICK_BINARY"] = im_path
     except:
         pass
 
