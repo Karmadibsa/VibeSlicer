@@ -185,7 +185,7 @@ def fast_cut_workflow(video_path):
 # 4. PHASE 2 & 3: SUBTITLES & EXPORT
 # ==================================================================================
 
-def transcribe_and_burn(video_clip):
+def transcribe_and_burn(video_clip, original_filename):
     print_step("Phase 2: Whisper Transcription")
     
     # Export temp audio of the CUT video
@@ -265,10 +265,12 @@ def transcribe_and_burn(video_clip):
     final_video = mp.CompositeVideoClip([video_clip] + text_clips)
     
     # Export
-    output_filename = f"Reel_Final_{int(time.time())}.mp4"
+    name_root = os.path.splitext(original_filename)[0]
+    output_filename = f"Reel_Ready_{name_root}.mp4"
     output_path = os.path.join(CONFIG["OUTPUT_DIR"], output_filename)
     
     print_step(f"Exporting to {output_path} (NVENC)...")
+
     try:
         final_video.write_videofile(
             output_path,
@@ -296,19 +298,30 @@ def transcribe_and_burn(video_clip):
 def main():
     print(f"{Fore.MAGENTA}=== REEL MAKER: ESSENTIAL CUT & SUB ==={Style.RESET_ALL}")
     
-    # Find video
-    files = [f for f in os.listdir(CONFIG["INPUT_DIR"]) if f.lower().endswith(('.mp4', '.mov'))]
+    # Find videos
+    files = [f for f in os.listdir(CONFIG["INPUT_DIR"]) if f.lower().endswith(('.mp4', '.mov', '.mkv'))]
     if not files:
         print_warn(f"No video found in {CONFIG['INPUT_DIR']}")
         return
+    
+    print_info(f"Found {len(files)} video(s) to process.")
+
+    for i, filename in enumerate(files):
+        print(f"\n{Fore.CYAN}--- Processing File {i+1}/{len(files)}: {filename} ---{Style.RESET_ALL}")
+        target_vid = os.path.join(CONFIG["INPUT_DIR"], filename)
         
-    target_vid = os.path.join(CONFIG["INPUT_DIR"], files[0])
-    
-    # 1. Fast Cut
-    cut_clip = fast_cut_workflow(target_vid)
-    
-    # 2. Transcription & Burn
-    transcribe_and_burn(cut_clip)
+        # 1. Fast Cut
+        # We need to wrap the whole process per file
+        try:
+            cut_clip = fast_cut_workflow(target_vid)
+            
+            # 2. Transcription & Burn
+            # Pass the filename to helper to generate better output name
+            transcribe_and_burn(cut_clip, filename)
+            
+        except Exception as e:
+            print(f"{Fore.RED}Error processing {filename}: {e}{Style.RESET_ALL}")
+
 
 if __name__ == "__main__":
     main()
