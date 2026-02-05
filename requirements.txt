@@ -3,7 +3,7 @@ faster-whisper
 pydub
 colorama
 python-dotenv
-opeanai-whisper
+
 torch
 torchaudio
 torchvision
