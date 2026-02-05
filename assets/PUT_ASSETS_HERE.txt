@@ -1,0 +1,3 @@
+Place 'outro.mp4' and 'Poppins-Bold.ttf' in this folder.
+If 'Poppins-Bold.ttf' is missing, the script will try to use the system font 'Poppins-Bold'.
+If 'outro.mp4' is missing, the outro step will be skipped.

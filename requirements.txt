@@ -1,0 +1,9 @@
+moviepy<2.0.0
+faster-whisper
+pydub
+colorama
+python-dotenv
+opeanai-whisper
+torch
+torchaudio
+torchvision
