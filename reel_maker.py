@@ -196,7 +196,8 @@ def transcribe_and_burn(video_clip, original_filename):
     
     # Export temp audio of the CUT video
     temp_audio = os.path.join(CONFIG["TEMP_DIR"], "cut_audio.wav")
-    video_clip.audio.write_audiofile(temp_audio, logger=None)
+    # Fix for 'CompositeAudioClip has no fps': specify fps (e.g., 44100)
+    video_clip.audio.write_audiofile(temp_audio, fps=44100, logger=None)
     
     # Load Whisper
     print_info(f"Loading Whisper ({CONFIG['WHISPER_MODEL_SIZE']}) on {CONFIG['DEVICE']}...")
