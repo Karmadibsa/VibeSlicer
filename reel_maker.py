@@ -4,6 +4,14 @@ import subprocess
 import msvcrt
 from datetime import timedelta
 
+# Force Windows to look for DLLs in the script folder (for portable CUDA DLLs)
+if os.name == 'nt':
+    try:
+        os.add_dll_directory(os.getcwd())
+        os.add_dll_directory(os.path.dirname(os.path.abspath(__file__)))
+    except AttributeError:
+        pass  # Python < 3.8
+
 # Third-party imports
 from dotenv import load_dotenv
 from colorama import init, Fore, Style
