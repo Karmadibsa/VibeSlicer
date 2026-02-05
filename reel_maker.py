@@ -15,6 +15,28 @@ from faster_whisper import WhisperModel
 init(autoreset=True)
 load_dotenv()
 
+# DETECT IMAGEMAGICK (CRITICAL FOR TEXTCLIPS)
+if os.name == 'nt':
+    try:
+        # Try finding it in path
+        from shutil import which
+        im_path = which("magick")
+        if im_path:
+            os.environ["IMAGEMAGICK_BINARY"] = im_path
+        else:
+            # Check common paths
+            common_paths = [
+                r"C:\Program Files\ImageMagick-7.1.3-Q16-HDRI\magick.exe",
+                r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe",
+                r"C:\Program Files\ImageMagick-7.1.1-Q16-HDRI\magick.exe",
+            ]
+            for p in common_paths:
+                if os.path.exists(p):
+                    os.environ["IMAGEMAGICK_BINARY"] = p
+                    break
+    except:
+        pass
+
 # ==================================================================================
 # 1. CONFIGURATION
 # ==================================================================================
