@@ -150,7 +150,13 @@ def fast_cut_workflow(video_path):
             "-hide_banner", "-loglevel", "error",
             video_path
         ]
-        subprocess.run(cmd)
+        try:
+            subprocess.run(cmd)
+        except FileNotFoundError:
+            print(f"\n{Fore.RED}[ERREUR] 'ffplay' non trouvé !{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Impossible de lancer la prévisualisation. Installez FFmpeg et ajoutez-le au PATH.{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Commande recommandée: winget install Gyan.FFmpeg{Style.RESET_ALL}") 
+
         
         # Ask User
         should_cut = wait_for_key_validation()
