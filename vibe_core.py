@@ -272,7 +272,7 @@ class VibeProcessor:
                 "ffmpeg", "-y",
                 "-i", video_no_music,
                 "-i", music_path,
-                "-filter_complex", "[1:a]volume=0.10[bgm];[0:a][bgm]amix=inputs=2:duration=first[aout]",
+                "-filter_complex", "[1:a]volume=0.10[bgm];[0:a][bgm]amix=inputs=2:duration=first[mixed];[mixed]volume=2[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k",

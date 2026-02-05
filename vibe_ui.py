@@ -212,7 +212,10 @@ class VibeApp(ctk.CTk):
         
         self.log_box = ctk.CTkTextbox(self.main_frame, height=150)
         self.log_box.pack(fill="x", pady=20)
-        self.log("VibeSlicer v3.3 Ready.")
+        self.log("VibeSlicer v3.3 (Pro) Ready.")
+        
+        self.segment_vars = []
+        self.preview_file_path = None
 
     # --- ACTIONS ---
     def pick_title_color(self):
@@ -256,6 +259,7 @@ class VibeApp(ctk.CTk):
         if not self.selected_files: return
         target = self.selected_files[0] 
         self.log(f"Analyse de {os.path.basename(target)}...")
+        self.preview_file_path = target
         threading.Thread(target=self._run_analysis, args=(target,)).start()
 
     def _run_analysis(self, video_path):
@@ -277,11 +281,27 @@ class VibeApp(ctk.CTk):
     def _display_segments(self, segments, video_path):
         for widget in self.segments_scroll.winfo_children(): widget.destroy()
         
+        self.segment_vars = [] # Reset
+        
         for i, (start, end) in enumerate(segments):
             row = ctk.CTkFrame(self.segments_scroll)
             row.pack(fill="x", pady=2)
+            
+            # Checkbox Keep
+            var = ctk.IntVar(value=1)
+            self.segment_vars.append((var, start, end)) # Store var to check later if needed
+            
             dur = end - start
-            ctk.CTkLabel(row, text=f"Seq {i+1} : {start:.1f}s -> {end:.1f}s ({dur:.1f}s)").pack(side="left", padx=10)
+            seq_text = f"Sq {i+1} ({dur:.1f}s)"
+            
+            # Checkbox with text
+            chk = ctk.CTkCheckBox(row, text=seq_text, variable=var, width=80)
+            chk.pack(side="left", padx=5)
+            
+            # Time Label
+            ctk.CTkLabel(row, text=f"{start:.1f}s->{end:.1f}s").pack(side="left", padx=5)
+            
+            # Preview
             ctk.CTkButton(row, text="▶", width=30, fg_color="gray", 
                           command=lambda s=start, e=end: self.preview_segment(video_path, s, e)).pack(side="right", padx=10)
 
@@ -308,8 +328,22 @@ class VibeApp(ctk.CTk):
                 fname = os.path.basename(video_path)
                 self.log(f"> Processing {fname}...")
                 
-                audio_path = self.processor.extract_audio(video_path)
-                segments = self.processor.analyze_segments(audio_path, start_range=s_val, end_range=e_val)
+                # Check if this is the manually edited file
+                use_manual = False
+                manual_segments = []
+                
+                # We need to access self.segment_vars which is a GUI element, but we are in a thread.
+                # However, IntVar.get() usually works from threads in simple cases, or we can assume user didn't change it *during* batch.
+                if video_path == self.preview_file_path and self.segment_vars:
+                    self.log("Utilisation des segments modifiés manuellement...")
+                    for var, s, e in self.segment_vars:
+                        if var.get() == 1:
+                            manual_segments.append((s,e))
+                    segments = manual_segments
+                    use_manual = True
+                else:
+                    audio_path = self.processor.extract_audio(video_path)
+                    segments = self.processor.analyze_segments(audio_path, start_range=s_val, end_range=e_val)
                 
                 if not segments:
                     self.log("Skipping (No segments)")
