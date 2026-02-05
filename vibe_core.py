@@ -174,53 +174,111 @@ class VibeProcessor:
                         idx += 1
                         current_group = []
 
-    def burn_subtitle_and_title(self, video_path, srt_path, output_path, title_text="", title_duration=3, style_cfg=None):
-        """Final render with subtitles and optional title"""
-        srt_fixed = srt_path.replace("\\", "/").replace(":", "\\:")
+    def render_final_video(self, video_path, srt_path, output_path, title_text="", title_color="#8A2BE2", music_path=None, style_cfg=None):
+        """Advanced Render: Intro Freeze (1s), Music Mix (10%), Subtitles, Title"""
         
-        # Default Style
+        # 1. Prepare paths
+        srt_fixed = srt_path.replace("\\", "/").replace(":", "\\:")
+        if music_path: music_path = music_path.replace("\\", "/")
+        
+        # Style Config
         font_name = "Poppins"
         font_size = 22
-        primary_color = "&HFFFFFF"
-        outline_color = "&HE22B8A"
         
-        if style_cfg:
-            # Override if provided
-            pass 
-
+        # Default Violet for Outline if not specified
+        primary_color = style_cfg.get("primary_color", "&HFFFFFF") if style_cfg else "&HFFFFFF"
+        outline_color = style_cfg.get("outline_color", "&HE22B8A") if style_cfg else "&HE22B8A"
+        
         style_str = (f"Fontname={font_name},Fontsize={font_size},"
                      f"PrimaryColour={primary_color},OutlineColour={outline_color},"
                      f"BorderStyle=1,Outline=3,Alignment=2,MarginV=120")
 
-        # Filters
-        filters = [
-            "crop=ih*(9/16):ih", # Crop Portrait
-            f"subtitles='{srt_fixed}':force_style='{style_str}'"
-        ]
+        # 2. INTRO GENERATION (If Title exists)
+        main_input = video_path
         
-        # Add Title if present (drawtext)
         if title_text:
-            # Escape text for FFmpeg: escape single quotes and colons
-            title_text = title_text.replace("'", "").replace(":", "\\:")
+            intro_path = os.path.join(self.cfg.temp_dir, "intro_freeze.mp4")
+            # a) Extract frame 0 image
+            frame0_img = os.path.join(self.cfg.temp_dir, "frame0.jpg")
+            subprocess.run([
+                "ffmpeg", "-y", "-i", video_path, "-vframes", "1", "-q:v", "2", frame0_img
+            ], check=True)
             
-            # Absolute font path with FFmpeg escaping
+            # b) Create 1s Blurred Video with Title
+            # Title Font setup
+            title_text = title_text.replace("'", "").replace(":", "\\:")
             font_path = os.path.join(self.cfg.assets_dir, "Poppins-Bold.ttf").replace("\\", "/").replace(":", "\\:")
             
-            drawtext = (f"drawtext=fontfile='{font_path}':text='{title_text}':"
-                        f"fontcolor=white:fontsize=40:x=(w-text_w)/2:y=(h-text_h)/3:"
-                        f"borderw=2:bordercolor=black:enable='between(t,0,{title_duration})'")
-            # Insert before subtitles so subs are on top? Or after? Usually title is overlay.
-            # Let's put title AFTER crop, combined with subtitles
-            filters.insert(1, drawtext)
+            # Filter: Loop img -> Crop 9:16 -> Blur -> DrawText
+            # Ensure output is YUV420P standard
+            # Intro duration: 1s
+            vf_intro = (
+                f"loop=30:1,crop=ih*(9/16):ih,boxblur=20:5,"
+                f"drawtext=fontfile='{font_path}':text='{title_text}':"
+                f"fontcolor={title_color}:fontsize=80:x=(w-text_w)/2:y=(h-text_h)/2:"
+                f"borderw=5:bordercolor=black"
+            )
+            
+            # Generate Silent Audio for Intro (1s)
+            subprocess.run([
+                "ffmpeg", "-y", 
+                "-loop", "1", "-i", frame0_img,
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-vf", vf_intro,
+                "-t", "1",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest",
+                intro_path
+            ], check=True)
+            
+            has_intro = True
+        else:
+            has_intro = False
 
-        vf_chain = ",".join(filters)
+        # 3. PROCESS BODY (Crop + Subtitles)
+        body_path = os.path.join(self.cfg.temp_dir, "body_processed.mp4")
+        vf_body = f"crop=ih*(9/16):ih,subtitles='{srt_fixed}':force_style='{style_str}'"
         
-        cmd = [
+        subprocess.run([
             "ffmpeg", "-y", "-i", video_path,
-            "-vf", vf_chain,
-            "-c:v", "libx264", "-preset", "slow", "-crf", "21",
-            "-pix_fmt", "yuv420p",
+            "-vf", vf_body,
+            "-c:v", "libx264", "-preset", "slow", "-crf", "21", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
-            output_path
-        ]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            body_path
+        ], check=True)
+        
+        # 4. CONCAT (Intro + Body)
+        if has_intro:
+            concat_list = os.path.join(self.cfg.temp_dir, "final_concat.txt")
+            i_p = intro_path.replace("\\", "/")
+            b_p = body_path.replace("\\", "/")
+            
+            with open(concat_list, "w") as f:
+                f.write(f"file '{i_p}'\n")
+                f.write(f"file '{b_p}'\n")
+            
+            video_no_music = os.path.join(self.cfg.temp_dir, "video_nomusic.mp4")
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+                "-c", "copy", video_no_music
+            ], check=True)
+        else:
+            video_no_music = body_path # Just usage
+        
+        # 5. MIX MUSIC (If present)
+        if music_path and os.path.exists(music_path):
+            # Volume 0.10 (10%)
+            cmd_mix = [
+                "ffmpeg", "-y",
+                "-i", video_no_music,
+                "-i", music_path,
+                "-filter_complex", "[1:a]volume=0.10[bgm];[0:a][bgm]amix=inputs=2:duration=first[aout]",
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                output_path
+            ]
+            subprocess.run(cmd_mix, check=True)
+            
+        else:
+            shutil.copy(video_no_music, output_path)
