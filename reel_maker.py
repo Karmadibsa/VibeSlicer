@@ -4,13 +4,40 @@ import subprocess
 import msvcrt
 from datetime import timedelta
 
+# ==================================================================================
+# CUDA AUTO-DETECTION (Inject System Path for DLLs)
+# ==================================================================================
 # Force Windows to look for DLLs in the script folder (for portable CUDA DLLs)
 if os.name == 'nt':
     try:
         os.add_dll_directory(os.getcwd())
         os.add_dll_directory(os.path.dirname(os.path.abspath(__file__)))
     except AttributeError:
-        pass  # Python < 3.8
+        pass
+
+# Try to find installed CUDA Toolkit (v12.x or v13.x)
+cuda_path_v13 = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin"
+if os.path.exists(cuda_path_v13):
+    try:
+        os.add_dll_directory(cuda_path_v13)
+        print(f"✅ CUDA v13 chargé depuis : {cuda_path_v13}")
+    except: pass
+else:
+    # Guess v12.x
+    default_cuda = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+    if os.path.exists(default_cuda):
+        try:
+            versions = os.listdir(default_cuda)
+            for v in versions:
+                if v.startswith("v12"):
+                    found_path = os.path.join(default_cuda, v, "bin")
+                    if os.path.exists(found_path):
+                        os.add_dll_directory(found_path)
+                        print(f"✅ CUDA v12 trouvé et chargé : {found_path}")
+                        break
+        except: pass
+
+# ==================================================================================
 
 # Third-party imports
 from dotenv import load_dotenv
@@ -244,16 +271,12 @@ def transcribe_and_burn(video_clip, original_filename):
     
     # Load Whisper
     print_info(f"Loading Whisper ({CONFIG['WHISPER_MODEL_SIZE']}) on {CONFIG['DEVICE']}...")
-    # try:
-    #     model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=CONFIG["DEVICE"], compute_type=CONFIG["COMPUTE_TYPE"])
-    # except (Exception, OSError, RuntimeError) as e:
-    #     print_warn(f"GPU Load Failed (CUDA missing?): {e}")
-    #     print_warn("Falling back to CPU (slower but works)...")
-    #     model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device="cpu", compute_type="int8")
-
-    # FORCE CPU TEMPORARILY - CUDA INSTALL TOO COMPLEX FOR NOW
-    print_warn("Forcing CPU mode (simplest setup)...")
-    model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device="cpu", compute_type="int8")
+    try:
+        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=CONFIG["DEVICE"], compute_type=CONFIG["COMPUTE_TYPE"])
+    except (Exception, OSError, RuntimeError) as e:
+        print_warn(f"GPU Load Failed (CUDA missing?): {e}")
+        print_warn("Falling back to CPU (slower but works)...")
+        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device="cpu", compute_type="int8")
 
         
     segments, info = model.transcribe(temp_audio, word_timestamps=True)
