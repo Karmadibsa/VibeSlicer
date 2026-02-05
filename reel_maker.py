@@ -273,9 +273,10 @@ def transcribe_and_burn(video_clip, original_filename):
     print_info(f"Loading Whisper ({CONFIG['WHISPER_MODEL_SIZE']}) on {CONFIG['DEVICE']}...")
     try:
         model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=CONFIG["DEVICE"], compute_type=CONFIG["COMPUTE_TYPE"])
-    except (Exception, OSError, RuntimeError) as e:
-        print_warn(f"GPU Load Failed (CUDA missing?): {e}")
-        print_warn("Falling back to CPU (slower but works)...")
+    except:
+        import traceback
+        traceback.print_exc()
+        print_warn(f"GPU Load Failed. Switching to CPU.")
         model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device="cpu", compute_type="int8")
 
         
