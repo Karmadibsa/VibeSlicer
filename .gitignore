@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Videos & Audio
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+
+# Project dirs
+temp/
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+assets/*
+!assets/Poppins-Bold.ttf
+
+# VS Code
+.vscode/
