@@ -78,21 +78,24 @@ def get_font_path():
 def wait_for_key_validation():
     """
     Waits for user input: 
-    [Space] -> Cut (Return True)
-    [N] -> Keep (Return False)
+    [Space] -> Cut ('cut')
+    [N] -> Keep ('keep')
+    [A] -> Cut All ('all')
     """
-    print(f"{Fore.YELLOW}  >> [ESPACE] Couper  |  [N] Garder ce blanc{Style.RESET_ALL}", end="", flush=True)
+    print(f"{Fore.YELLOW}  >> [ESPACE] Couper | [N] Garder | [A] TOUT Couper (Auto){Style.RESET_ALL}", end="", flush=True)
     
     while True:
         if msvcrt.kbhit():
             key = msvcrt.getch().lower()
             if key == b' ':
                 print(f"\n  {Fore.RED}X Coupé{Style.RESET_ALL}")
-                return True # Cut
+                return 'cut'
             elif key == b'n':
                 print(f"\n  {Fore.GREEN}O Gardé{Style.RESET_ALL}")
-                return False # Keep
-            # Ignore other keys
+                return 'keep'
+            elif key == b'a':
+                print(f"\n  {Fore.RED}>>> ACTIVATION AUTO-CUT <<< (Coupe tout le reste){Style.RESET_ALL}")
+                return 'all'
 
 # ==================================================================================
 # 3. PHASE 1: FAST CUT
@@ -125,43 +128,55 @@ def fast_cut_workflow(video_path):
     
     final_clips = []
     current_pos_ms = 0
+    auto_cut_remaining = False
     
     for i, (start_ms, end_ms) in enumerate(silences):
         # Logic: We are currently at current_pos_ms.
         # Check this silence from start_ms to end_ms.
         
-        # Determine context for preview
-        ctx = CONFIG["PREVIEW_CTX"]
-        prev_start = max(0, start_ms - ctx)
-        prev_end = end_ms + ctx
-        prev_duration = (prev_end - prev_start) / 1000.0
+        should_cut = False
         
-        print(f"\n{Fore.MAGENTA}--- Silence #{i+1}: {format_time(start_ms)} -> {format_time(end_ms)} ({end_ms-start_ms}ms) ---")
-        
-        # Launch FFplay preview
-        # Play the silence + context
-        cmd = [
-            "ffplay", 
-            "-ss", str(prev_start / 1000.0), 
-            "-t", str(prev_duration), 
-            "-autoexit", 
-            "-window_title", f"CUT #{i+1} ?",
-            "-x", "500", "-y", "300",
-            "-hide_banner", "-loglevel", "error",
-            video_path
-        ]
-        try:
-            subprocess.run(cmd)
-        except FileNotFoundError:
-            print(f"\n{Fore.RED}[ERREUR] 'ffplay' non trouvé !{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Impossible de lancer la prévisualisation. Installez FFmpeg et ajoutez-le au PATH.{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Commande recommandée: winget install Gyan.FFmpeg{Style.RESET_ALL}") 
-
-        
-        # Ask User
-        should_cut = wait_for_key_validation()
+        if auto_cut_remaining:
+            should_cut = True
+        else:
+            # Determine context for preview
+            ctx = CONFIG["PREVIEW_CTX"]
+            prev_start = max(0, start_ms - ctx)
+            prev_end = end_ms + ctx
+            prev_duration = (prev_end - prev_start) / 1000.0
+            
+            print(f"\n{Fore.MAGENTA}--- Silence #{i+1}: {format_time(start_ms)} -> {format_time(end_ms)} ({end_ms-start_ms}ms) ---")
+            
+            # Launch FFplay preview
+            cmd = [
+                "ffplay", 
+                "-ss", str(prev_start / 1000.0), 
+                "-t", str(prev_duration), 
+                "-autoexit", 
+                "-window_title", f"CUT #{i+1} ?",
+                "-x", "500", "-y", "300",
+                "-hide_banner", "-loglevel", "error",
+                video_path
+            ]
+            try:
+                subprocess.run(cmd)
+            except FileNotFoundError:
+                print(f"\n{Fore.RED}[ERREUR] 'ffplay' non trouvé !{Style.RESET_ALL}")
+            
+            # Ask User
+            action = wait_for_key_validation()
+            if action == 'cut':
+                should_cut = True
+            elif action == 'all':
+                should_cut = True
+                auto_cut_remaining = True
+            else:
+                should_cut = False # Keep
         
         if should_cut:
+            if auto_cut_remaining:
+                print(f"{Fore.RED}.{Style.RESET_ALL}", end="", flush=True) # Minimal feedback in auto mode
+
             # We cut this silence.
             # Keep anything from current_pos_ms to start_ms
             if start_ms > current_pos_ms:
@@ -172,9 +187,7 @@ def fast_cut_workflow(video_path):
             # Move current_pos to after the silence
             current_pos_ms = end_ms
         else:
-            # We keep this silence.
-            # Do nothing, meaning the 'next' segment will start from current_pos_ms which is BEFORE this silence.
-            # Basically we just skip this detection logic and treat it as normal audio.
+            # Keep silence, effectively skipping logic
             pass
             
     # Add remainder of video
@@ -321,6 +334,24 @@ def main():
         # We need to wrap the whole process per file
         try:
             cut_clip = fast_cut_workflow(target_vid)
+            
+            # SAVE INTERMEDIATE CUT (Raw video before subtitles)
+            name_root = os.path.splitext(filename)[0]
+            raw_cut_name = f"Raw_Cut_{name_root}.mp4"
+            raw_cut_path = os.path.join(CONFIG["OUTPUT_DIR"], raw_cut_name)
+            
+            print_step(f"Saving Intermediate Cut Video to {raw_cut_path}...")
+            # Use same encoding settings as final export for consistency
+            cut_clip.write_videofile(
+                raw_cut_path,
+                fps=30,
+                codec="h264_nvenc", # Or libx264 if nvenc fails, but let's stick to default trial
+                audio_codec="aac",
+                threads=4,
+                preset="fast",
+                logger=None # Less spam
+            )
+            print(f"{Fore.GREEN}>> Video monté (sans sous-titres) sauvegardé !{Style.RESET_ALL}")
             
             # 2. Transcription & Burn
             # Pass the filename to helper to generate better output name
