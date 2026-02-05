@@ -16,6 +16,11 @@ if %errorlevel% neq 0 (
     exit
 )
 
+:: Installation des dépendances (si nécessaire)
+echo Installation / Mise a jour des bibliotheques...
+pip install -r requirements.txt
+echo.
+
 :: Lancer le script
 python reel_maker.py
 
