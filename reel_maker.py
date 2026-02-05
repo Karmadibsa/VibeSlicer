@@ -213,10 +213,9 @@ def transcribe_and_burn(video_clip, original_filename):
     video_clip.audio.write_audiofile(temp_audio, fps=44100, logger=None)
     
     # Load Whisper
-    print_info(f"Loading Whisper ({CONFIG['WHISPER_MODEL_SIZE']})...")
+    print_info(f"Loading Whisper ({CONFIG['WHISPER_MODEL_SIZE']}) on {CONFIG['DEVICE']}...")
     try:
-        # Force CPU to avoid DLL hell if CUDA is partial
-        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device="cpu", compute_type="int8")
+        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=CONFIG["DEVICE"], compute_type=CONFIG["COMPUTE_TYPE"])
     except Exception as e:
         print_warn(f"GPU Load Failed: {e}. Switching to CPU/int8.")
         try:
