@@ -5,7 +5,8 @@ import os
 import time
 import subprocess
 import re
-from vibe_core import VibeProcessor, TrimConfig
+from PIL import Image
+from vibe_core import VibeProcessor
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -17,390 +18,445 @@ def hex_to_ass(hex_color):
     r, g, b = hex_color[0:2], hex_color[2:4], hex_color[4:6]
     return f"&H{b}{g}{r}".upper()
 
-# --- TIMELINE WIDGET ---
-class InteractiveTimeline(ctk.CTkFrame):
-    def __init__(self, master, height=60, workflow_callback=None, **kwargs):
-        super().__init__(master, height=height, **kwargs)
-        self.workflow_callback = workflow_callback # func(segments)
-        self.canvas = ctk.CTkCanvas(self, height=height, bg="#2b2b2b", highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True, padx=5, pady=5)
-        self.canvas.bind("<Button-1>", self.on_click)
+def ms_to_timestamp(ms):
+    s = ms / 1000
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{int(h):02d}:{int(m):02d}:{s:06.3f}".replace(".", ",")
+
+def get_frame_at_time(video_path, time_sec):
+    """Extract a frame object using FFmpeg"""
+    try:
+        cmd = [
+            "ffmpeg", "-ss", str(time_sec), "-i", video_path,
+            "-vframes", "1", "-q:v", "2", "-f", "image2pipe", "-"
+        ]
+        # Hide console
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        pipe = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=creationflags)
+        out, _ = pipe.communicate()
+        if not out: return None
         
-        self.duration = 100
-        # format: list of {"start": s, "end": e, "active": bool}
-        self.blocks = [] 
+        # Load into PIL
+        import io
+        return Image.open(io.BytesIO(out))
+    except:
+        return None
+
+# --- WIDGETS ---
+
+class VideoPreview(ctk.CTkFrame):
+    def __init__(self, master, video_path, **kwargs):
+        super().__init__(master, **kwargs)
+        self.video_path = video_path
+        self.image_label = ctk.CTkLabel(self, text="Chargement...", corner_radius=10)
+        self.image_label.pack(fill="both", expand=True)
+        self.last_img = None
         
-    def load_data(self, duration, segments):
-        self.duration = duration
-        self.blocks = []
+    def show_time(self, time_sec):
+        # Run in thread to avoid UI freeze? 
+        threading.Thread(target=self._update_img, args=(time_sec,)).start()
         
-        # Convert raw segments [(s,e), (s,e)] to blocks covering the whole timeline?
-        # No, just represent the speech segments as blocks.
-        # But user might want to restore silence?
-        # For simplicity V1: Only show detected speech blocks.
-        # Detecting silence user wants to restore is harder without re-running VAD.
-        # Let's visualize the "Kept" segments.
-        
-        for s, e in segments:
-            self.blocks.append({"start": s, "end": e, "active": True})
+    def _update_img(self, time_sec):
+        pil_img = get_frame_at_time(self.video_path, time_sec)
+        if pil_img:
+            # Resize
+            w = self.winfo_width()
+            h = self.winfo_height()
+            if w < 100: w=300; h=200
             
-        self.redraw()
+            # Maintain aspect ratio
+            ratio = pil_img.width / pil_img.height
+            new_h = h
+            new_w = int(h * ratio)
+            if new_w > w:
+                new_w = w
+                new_h = int(w / ratio)
+                
+            pil_img = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+            ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(new_w, new_h))
+            
+            self.after(0, lambda: self.image_label.configure(text="", image=ctk_img))
+
+class TimelineWidget(ctk.CTkFrame):
+    def __init__(self, master, duration, segments, on_seek_callback=None, **kwargs):
+        super().__init__(master, **kwargs)
+        self.duration = duration
+        self.segments = [{"start": s, "end": e, "active": True} for s,e in segments]
+        self.on_seek_callback = on_seek_callback
         
-    def redraw(self):
+        self.canvas = ctk.CTkCanvas(self, height=60, bg="#1a1a1a", highlightthickness=0)
+        self.canvas.pack(fill="x", expand=True, padx=5, pady=5)
+        self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.cursor_pos = 0 # seconds
+        self.draw()
+        
+    def draw(self):
         self.canvas.delete("all")
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
-        if w < 10: w = 800 # fallback
+        if w < 10: w = 600
         
-        # Draw background (Red/Silence)
-        self.canvas.create_rectangle(0, 0, w, h, fill="#3a1b1b", outline="")
-        
-        # Draw segments (Green/Speech)
         scale = w / self.duration if self.duration > 0 else 1
         
-        for i, b in enumerate(self.blocks):
-            x1 = b["start"] * scale
-            x2 = b["end"] * scale
-            color = "#2b8a3e" if b["active"] else "#5c5c5c" # Green if kept, Gray if discarded
+        # Base (Silence)
+        self.canvas.create_rectangle(0, 0, w, h, fill="#4a0000", outline="")
+        
+        # Segments
+        for seg in self.segments:
+            x1 = seg["start"] * scale
+            x2 = seg["end"] * scale
+            col = "#00cc44" if seg["active"] else "#555555"
+            self.canvas.create_rectangle(x1, 2, x2, h-2, fill=col, outline="white" if seg["active"] else "", tags="seg")
             
-            # Tags to identify block
-            tag = f"block_{i}"
-            self.canvas.create_rectangle(x1, 2, x2, h-2, fill=color, outline="white" if b["active"] else "", tags=tag)
-            
+        # Cursor
+        cx = self.cursor_pos * scale
+        self.canvas.create_line(cx, 0, cx, h, fill="white", width=2)
+        
     def on_click(self, event):
+        self._input(event)
         w = self.canvas.winfo_width()
         scale = self.duration / w if w > 0 else 0
-        click_time = event.x * scale
+        t = event.x * scale
         
-        # Find which block was clicked
-        toggled = False
-        for i, b in enumerate(self.blocks):
-            if b["start"] <= click_time <= b["end"]:
-                b["active"] = not b["active"]
-                toggled = True
-                # Preview toggle?
+        # Toggle segment if clicked
+        for seg in self.segments:
+            if seg["start"] <= t <= seg["end"]:
+                seg["active"] = not seg["active"]
                 break
-        
-        if toggled:
-            self.redraw()
-            # Notify parent to update segments
-            valid_segs = [(b["start"], b["end"]) for b in self.blocks if b["active"]]
-            if self.workflow_callback: self.workflow_callback(valid_segs)
+        self.draw()
 
-# --- SUBTITLE EDITOR WINDOW (Keep previous logic) ---
-class SubtitleEditorWindow(ctk.CTkToplevel):
-    def __init__(self, master, srt_path, video_path):
-        super().__init__(master)
-        self.title("Éditeur de Sous-titres (Vérification)")
-        self.geometry("900x600")
-        self.srt_path = srt_path
-        self.video_path = video_path
-        self.entries = []
-        self.load_srt()
-        top_frame = ctk.CTkFrame(self)
-        top_frame.pack(fill="x", padx=10, pady=10)
-        ctk.CTkLabel(top_frame, text="Modifiez le texte. [▶] pour prévisualiser.", text_color="gray").pack()
-        self.scroll = ctk.CTkScrollableFrame(self)
-        self.scroll.pack(fill="both", expand=True, padx=10, pady=5)
-        self.populate_ui()
-        btn_frame = ctk.CTkFrame(self)
-        btn_frame.pack(fill="x", padx=10, pady=10)
-        ctk.CTkButton(btn_frame, text="Sauvegarder & Fermer", fg_color="green", command=self.save_and_close).pack(side="right")
-    def load_srt(self):
-        with open(self.srt_path, "r", encoding="utf-8") as f: content = f.read()
-        blocks = content.strip().split('\n\n')
-        self.parsed_data = []
+    def on_drag(self, event):
+        self._input(event)
+        
+    def _input(self, event):
+        w = self.canvas.winfo_width()
+        if w == 0: return
+        t = (event.x / w) * self.duration
+        t = max(0, min(t, self.duration))
+        self.cursor_pos = t
+        if self.on_seek_callback: self.on_seek_callback(t)
+        self.draw()
+        
+    def get_active_segments(self):
+        return [(s["start"], s["end"]) for s in self.segments if s["active"]]
+
+
+# --- APP WIZARD PAGES ---
+
+class VibeWizardApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("VibeSlicer v4.1 (Studio Mode)")
+        self.geometry("1200x800")
+        
+        self.processor = VibeProcessor()
+        self.files_to_process = [] # list of paths
+        self.projects_data = [] # list of dicts with all info for render
+        
+        # Container
+        self.container = ctk.CTkFrame(self)
+        self.container.pack(fill="both", expand=True)
+        
+        self.show_file_selection()
+
+    # STEP 1: SELECT FILES
+    def show_file_selection(self):
+        self.clear_container()
+        
+        lbl = ctk.CTkLabel(self.container, text="1. Sélectionnez vos Rushs", font=("Arial", 25, "bold"))
+        lbl.pack(pady=30)
+        
+        btn_add = ctk.CTkButton(self.container, text="+ Ajouter Vidéos", command=self.add_files, width=200, height=50, font=("Arial", 16))
+        btn_add.pack(pady=10)
+        
+        self.list_frame = ctk.CTkScrollableFrame(self.container, width=600, height=350)
+        self.list_frame.pack(pady=10)
+        
+        self.btn_next = ctk.CTkButton(self.container, text="Commencer l'Édition ->", fg_color="green", height=50, width=200,
+                                      state="disabled", command=self.start_editing_flow, font=("Arial", 16, "bold"))
+        self.btn_next.pack(pady=30)
+        
+    def add_files(self):
+        paths = filedialog.askopenfilenames(filetypes=[("Video", "*.mp4 *.mov *.mkv")])
+        for p in paths:
+            if p not in self.files_to_process:
+                self.files_to_process.append(p)
+                lbl = ctk.CTkLabel(self.list_frame, text=os.path.basename(p), font=("Arial", 14))
+                lbl.pack(pady=2)
+        
+        if self.files_to_process:
+            self.btn_next.configure(state="normal")
+
+    def start_editing_flow(self):
+        self.current_idx = 0
+        self.projects_data = [] # Reset
+        self.edit_next_video()
+
+    # STEP 2: LOOP PER VIDEO
+    def edit_next_video(self):
+        if self.current_idx >= len(self.files_to_process):
+            # All done
+            self.show_final_batch_render()
+            return
+            
+        path = self.files_to_process[self.current_idx]
+        self.show_cut_editor(path)
+
+    # 2A: CUT EDITOR
+    def show_cut_editor(self, video_path):
+        self.clear_container()
+        fname = os.path.basename(video_path)
+        
+        # Header
+        top = ctk.CTkFrame(self.container, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=10)
+        ctk.CTkLabel(top, text=f"Édition: {fname}", font=("Arial", 20, "bold")).pack(side="left")
+        step_lbl = f"Vidéo {self.current_idx + 1} sur {len(self.files_to_process)}"
+        ctk.CTkLabel(top, text=step_lbl, text_color="gray", font=("Arial", 14)).pack(side="right")
+        
+        # Content
+        ctk.CTkLabel(self.container, text="Ajustez les coupes (Vert = Gardé, Rouge = Coupé)", font=("Arial", 14)).pack(pady=(10,5))
+        
+        # Preview Area
+        preview_frame = VideoPreview(self.container, video_path, width=600, height=350)
+        preview_frame.pack(pady=10)
+        
+        # Info
+        lbl_info = ctk.CTkLabel(self.container, text="Analyse audio en cours...", text_color="orange")
+        lbl_info.pack()
+        self.update() # Force paint
+        
+        # Run Analyze
+        threading.Thread(target=self._async_analyze, args=(video_path, lbl_info, preview_frame)).start()
+
+    def _async_analyze(self, video_path, lbl_info, preview_frame):
+        try:
+            # Extract Audio duration
+            from pydub import AudioSegment
+            audio_path = self.processor.extract_audio(video_path)
+            audio = AudioSegment.from_wav(audio_path)
+            dur = len(audio) / 1000.0
+            
+            # Auto Segments
+            segs = self.processor.analyze_segments(audio_path)
+            
+            # UI Update needs to be on main thread
+            self.after(0, lambda: self._setup_timeline(video_path, dur, segs, lbl_info, preview_frame))
+            
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("Erreur Analyse", str(e)))
+
+    def _setup_timeline(self, video_path, dur, segs, lbl_info, preview_frame):
+        lbl_info.configure(text="Cliquez sur la timeline pour couper/garder. Glissez pour prévisualiser.", text_color="silver")
+        
+        timeline = TimelineWidget(self.container, dur, segs, 
+                                  on_seek_callback=lambda t: preview_frame.show_time(t),
+                                  height=80)
+        timeline.pack(fill="x", padx=40, pady=20)
+        
+        # Params (Start/End trim optional) could be here but timeline handles it visually better.
+        
+        def confirm_cuts():
+            kept = timeline.get_active_segments()
+            if not kept:
+                messagebox.showerror("Erreur", "Aucun segment sélectionné (tout est rouge) !")
+                return
+            
+            project = {
+                "raw_path": video_path,
+                "segments": kept,
+                "duration": dur
+            }
+            self.process_cuts_and_transcribe(project)
+            
+        ctk.CTkButton(self.container, text="Valider & Transcrire ->", command=confirm_cuts, 
+                      fg_color="green", width=200, height=40).pack(pady=20)
+
+
+    # 2B: PROCESSING (Hidden)
+    def process_cuts_and_transcribe(self, project):
+        self.clear_container()
+        ctk.CTkLabel(self.container, text="Création de la séquence...", font=("Arial", 25)).pack(pady=50)
+        
+        log = ctk.CTkLabel(self.container, text="Patientez...", text_color="gray")
+        log.pack()
+        
+        bar = ctk.CTkProgressBar(self.container, width=400)
+        bar.pack(pady=20)
+        bar.configure(mode="indeterminate")
+        bar.start()
+        
+        def _work():
+            try:
+                # 1. Cut Video
+                idx = self.current_idx
+                concat_path = os.path.join(self.processor.cfg.temp_dir, f"wiz_{idx}.ffconcat")
+                cut_path = os.path.join(self.processor.cfg.temp_dir, f"wiz_{idx}.mp4")
+                
+                self.after(0, lambda: log.configure(text="Découpage & Assemblage..."))
+                self.processor.create_cut_file(project["raw_path"], project["segments"], concat_path)
+                self.processor.render_cut(concat_path, cut_path)
+                project["cut_path"] = cut_path
+                
+                # 2. Transcribe
+                self.after(0, lambda: log.configure(text="Transcription IA..."))
+                wsegs = self.processor.transcribe(cut_path)
+                
+                srt_path = os.path.join(self.processor.cfg.temp_dir, f"wiz_{idx}.srt")
+                self.processor.generate_srt(wsegs, srt_path, uppercase=True) # Default
+                project["srt_path"] = srt_path
+                
+                self.after(0, lambda: self.show_subtitle_editor(project))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Erreur Process", str(e)))
+            
+        threading.Thread(target=_work).start()
+
+    # 2C: SUBTITLE EDITOR
+    def show_subtitle_editor(self, project):
+        self.clear_container()
+        
+        ctk.CTkLabel(self.container, text=f"Sous-titres: {os.path.basename(project['raw_path'])}", font=("Arial", 20, "bold")).pack(pady=10)
+        ctk.CTkLabel(self.container, text="Corrigez le texte ci-dessous.", text_color="gray").pack()
+
+        # Load SRT
+        with open(project["srt_path"], "r", encoding="utf-8") as f:
+            raw_srt = f.read()
+            
+        scroll = ctk.CTkScrollableFrame(self.container, height=400, width=800)
+        scroll.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        blocks = raw_srt.strip().split('\n\n')
+        entries = []
+        
         for b in blocks:
             lines = b.split('\n')
             if len(lines) >= 3:
                 times = lines[1]
-                text = "\n".join(lines[2:])
-                t_match = re.search(r'(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})', times)
-                start, dur = 0, 2
-                if t_match:
-                    h, m, s, ms = map(int, t_match.groups()[0:4])
-                    start = h*3600 + m*60 + s + ms/1000.0
-                    h2, m2, s2, ms2 = map(int, t_match.groups()[4:8])
-                    end = h2*3600 + m2*60 + s2 + ms2/1000.0
-                    dur = end - start
-                self.parsed_data.append({"idx": lines[0], "times": times, "text": text, "start": start, "duration": dur})
-    def populate_ui(self):
-        for data in self.parsed_data:
-            row = ctk.CTkFrame(self.scroll)
-            row.pack(fill="x", pady=2)
-            ctk.CTkLabel(row, text=data["times"], width=130, font=("Consolas", 11)).pack(side="left", padx=2)
-            txt_var = ctk.StringVar(value=data["text"])
-            ctk.CTkEntry(row, textvariable=txt_var).pack(side="left", fill="x", expand=True, padx=5)
-            cmd = lambda s=data["start"], d=data["duration"]: self.preview(s, d)
-            ctk.CTkButton(row, text="▶", width=30, command=cmd).pack(side="right", padx=5)
-            self.entries.append((data, txt_var))
-    def preview(self, start, dur):
-        cmd = ["ffplay", "-ss", str(start), "-t", str(dur), "-autoexit", "-window_title", "Preview", "-x", "400", "-y", "300", self.video_path]
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    def save_and_close(self):
-        with open(self.srt_path, "w", encoding="utf-8") as f:
-            for i, (data, var) in enumerate(self.entries):
-                f.write(f"{i+1}\n{data['times']}\n{var.get().strip()}\n\n")
-        self.destroy()
-
-# --- MAIN APP ---
-class VibeApp(ctk.CTk):
-    def __init__(self):
-        super().__init__()
-        self.processor = VibeProcessor()
-        self.file_data = {} # { "abs_path": { "segments": [], "duration": 0, "status": "analyzed" } }
-        self.current_edit_file = None
+                txt = "\n".join(lines[2:])
+                
+                row = ctk.CTkFrame(scroll)
+                row.pack(fill="x", pady=2)
+                
+                # Play button logic? A bit complex without reloading cut video in preview.
+                # Just Text entry for now.
+                
+                ctk.CTkLabel(row, text=times, font=("Consolas", 11), width=150).pack(side="left", padx=5)
+                v = ctk.StringVar(value=txt)
+                ctk.CTkEntry(row, textvariable=v).pack(side="left", fill="x", expand=True, padx=5)
+                entries.append(v)
         
-        self.title("VibeSlicer v4.0 (Timeline Edition)")
-        self.geometry("1100x850")
-        
-        # Colors
-        self.title_color_hex = "#8A2BE2" 
-        self.sub_color_hex = "#E22B8A"   
-        
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-        
-        # Sidebar
-        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
-        self.sidebar.grid(row=0, column=0, rowspan=4, sticky="nsew")
-        ctk.CTkLabel(self.sidebar, text="VibeSlicer", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=20)
-        
-        ctk.CTkButton(self.sidebar, text="Ajouter Vidéos", command=self.add_videos).pack(pady=10)
-        
-        # Listbox (using simplified Text widget, but ideally CTkListbox)
-        # We will use a clickable frame list for better UX
-        self.files_scroll = ctk.CTkScrollableFrame(self.sidebar, label_text="Fichiers (Cliquer pour éditer)")
-        self.files_scroll.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        ctk.CTkButton(self.sidebar, text="TRAITER TOUT 🚀", fg_color="green", height=40, command=self.start_batch_thread).pack(pady=20, padx=20)
-
-        # Main Area
-        self.main_frame = ctk.CTkScrollableFrame(self, label_text="Espace de Travail")
-        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
-        
-        # 1. Timeline
-        self.timeline_frame = ctk.CTkFrame(self.main_frame)
-        self.timeline_frame.pack(fill="x", pady=10)
-        ctk.CTkLabel(self.timeline_frame, text="Timeline Visuelle (Vert = Gardé, Rouge = Coupé)", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=5)
-        
-        self.timeline = InteractiveTimeline(self.timeline_frame, height=60, workflow_callback=self.on_timeline_edit)
-        self.timeline.pack(fill="x", padx=10, pady=10)
-        
-        self.lbl_current_file = ctk.CTkLabel(self.timeline_frame, text="Aucun fichier sélectionné", text_color="gray")
-        self.lbl_current_file.pack(pady=5)
-        
-        self.btn_analyze = ctk.CTkButton(self.timeline_frame, text="Analyser ce fichier", command=self.analyze_current_ui)
-        self.btn_analyze.pack(pady=5)
-
-        # 2. Settings
-        self.setup_settings_ui()
-        
-        # 3. Log
-        self.log_box = ctk.CTkTextbox(self.main_frame, height=150)
-        self.log_box.pack(fill="x", pady=20)
-        self.log("Bienvenue! Ajoutez des vidéos. Cliquez sur une vidéo dans la liste pour voir sa Timeline.")
-
-    def setup_settings_ui(self):
-        frame = ctk.CTkFrame(self.main_frame)
-        frame.pack(fill="x", pady=10)
-        inner = ctk.CTkFrame(frame, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=10)
-        
-        # Config Grid
-        ctk.CTkLabel(inner, text="Titre:").grid(row=0, column=0, sticky="w")
-        self.entry_title = ctk.CTkEntry(inner, placeholder_text="Mon Titre")
-        self.entry_title.grid(row=0, column=1, sticky="ew", padx=5)
-        
-        self.btn_col_t = ctk.CTkButton(inner, text="Couleur Titre", width=80, fg_color=self.title_color_hex, command=self.pick_title_col)
-        self.btn_col_t.grid(row=0, column=2, padx=5)
-        
-        self.chk_upper = ctk.CTkCheckBox(inner, text="MAJ")
-        self.chk_upper.grid(row=0, column=3, padx=5)
-        
-        ctk.CTkLabel(inner, text="Musique:").grid(row=1, column=0, sticky="w", pady=10)
-        self.entry_music = ctk.CTkEntry(inner)
-        self.entry_music.grid(row=1, column=1, sticky="ew", padx=5)
-        ctk.CTkButton(inner, text="...", width=30, command=self.browse_music).grid(row=1, column=2, padx=5)
-        
-        self.chk_verify = ctk.CTkCheckBox(inner, text="Vérifier SRT")
-        self.chk_verify.grid(row=1, column=3, padx=5)
-        
-        # Colors
-        self.btn_col_s = ctk.CTkButton(inner, text="Couleur Subs", width=80, fg_color=self.sub_color_hex, command=self.pick_sub_col)
-        self.btn_col_s.grid(row=0, column=4, padx=5)
-        
-        # Trim params
-        bg_trim = ctk.CTkFrame(self.main_frame)
-        bg_trim.pack(fill="x", pady=5)
-        ctk.CTkLabel(bg_trim, text="Paramètres Analyse Auto:").pack(side="left", padx=10)
-        self.entry_start = ctk.CTkEntry(bg_trim, width=60, placeholder_text="Debut")
-        self.entry_start.pack(side="left", padx=5)
-        self.entry_end = ctk.CTkEntry(bg_trim, width=60, placeholder_text="Fin")
-        self.entry_end.pack(side="left", padx=5)
-
-    # --- LOGIC ---
-    def log(self, text):
-        self.log_box.insert("end", text + "\n")
-        self.log_box.see("end")
-
-    def pick_title_col(self):
-        c = colorchooser.askcolor(initialcolor=self.title_color_hex)[1]
-        if c: 
-            self.title_color_hex = c
-            self.btn_col_t.configure(fg_color=c)
-
-    def pick_sub_col(self):
-        c = colorchooser.askcolor(initialcolor=self.sub_color_hex)[1]
-        if c: 
-            self.sub_color_hex = c
-            self.btn_col_s.configure(fg_color=c)
+        def confirm_subs():
+            # Save SRT back
+            with open(project["srt_path"], "w", encoding="utf-8") as f:
+                new_blocks = raw_srt.strip().split('\n\n')
+                for i, b in enumerate(new_blocks):
+                    lines = b.split('\n')
+                    if len(lines) >= 3 and i < len(entries):
+                        f.write(f"{lines[0]}\n{lines[1]}\n{entries[i].get()}\n\n")
             
-    def browse_music(self):
+            self.show_final_settings(project)
+
+        ctk.CTkButton(self.container, text="Valider Sous-titres ->", command=confirm_subs, fg_color="green").pack(pady=10)
+    
+    # 2D: FINAL SETTINGS for this file
+    def show_final_settings(self, project):
+        self.clear_container()
+        ctk.CTkLabel(self.container, text=f"Finitions: {os.path.basename(project['raw_path'])}", font=("Arial", 20, "bold")).pack(pady=20)
+        
+        f = ctk.CTkFrame(self.container)
+        f.pack(pady=10, padx=50)
+        
+        # Title
+        ctk.CTkLabel(f, text="Titre Intro:").grid(row=0, column=0, pady=10, padx=10, sticky="e")
+        e_title = ctk.CTkEntry(f, width=250, placeholder_text="Ex: MEP CLIPS #1")
+        e_title.grid(row=0, column=1, pady=10, padx=10)
+        
+        ctk.CTkLabel(f, text="Couleur Titre:").grid(row=1, column=0, pady=10, padx=10, sticky="e")
+        e_col_t = ctk.CTkButton(f, text="     ", fg_color="#8A2BE2", width=50, command=lambda: self._pick_col(e_col_t))
+        e_col_t.grid(row=1, column=1, sticky="w", padx=10)
+        
+        # Music
+        ctk.CTkLabel(f, text="Musique:").grid(row=2, column=0, pady=10, padx=10, sticky="e")
+        e_music = ctk.CTkEntry(f, width=250)
+        e_music.grid(row=2, column=1, pady=10, padx=10)
+        ctk.CTkButton(f, text="Browse", width=60, command=lambda: self._browse_music(e_music)).grid(row=2, column=2, padx=5)
+        
+        # Subs style
+        ctk.CTkLabel(f, text="Couleur Subs:").grid(row=3, column=0, pady=10, padx=10, sticky="e")
+        e_col_s = ctk.CTkButton(f, text="     ", fg_color="#E22B8A", width=50, command=lambda: self._pick_col(e_col_s))
+        e_col_s.grid(row=3, column=1, sticky="w", padx=10)
+
+        def finish_video():
+            project["title"] = e_title.get()
+            project["title_color"] = e_col_t.cget("fg_color")
+            project["music"] = e_music.get()
+            project["sub_color"] = e_col_s.cget("fg_color")
+            
+            self.projects_data.append(project)
+            self.current_idx += 1
+            self.edit_next_video()
+            
+        ctk.CTkButton(self.container, text="Terminer ce fichier ->", fg_color="green", height=50, width=200, command=finish_video).pack(pady=30)
+        
+    def _pick_col(self, btn):
+        c = colorchooser.askcolor(initialcolor=btn.cget("fg_color"))[1]
+        if c: btn.configure(fg_color=c)
+
+    def _browse_music(self, entry):
         f = filedialog.askopenfilename(filetypes=[("Audio", "*.mp3 *.wav")])
         if f: 
-            self.entry_music.delete(0, "end")
-            self.entry_music.insert(0, f)
+            entry.delete(0, "end")
+            entry.insert(0, f)
 
-    def add_videos(self):
-        files = filedialog.askopenfilenames(filetypes=[("Video files", "*.mp4 *.mov *.mkv")])
-        for f in files:
-            norm_f = os.path.normpath(f)
-            if norm_f not in self.file_data:
-                self.file_data[norm_f] = {"segments": [], "duration": 0, "analyzed": False}
-                self.add_file_btn(norm_f)
-        self.log(f"Ajouté {len(files)} fichiers.")
+    # STEP 3: BATCH RENDER
+    def show_final_batch_render(self):
+        self.clear_container()
+        ctk.CTkLabel(self.container, text="Tout est prêt ! 🎬", font=("Arial", 30, "bold")).pack(pady=30)
+        ctk.CTkLabel(self.container, text=f"{len(self.projects_data)} vidéos prêtes à être exportées.", font=("Arial", 16)).pack()
         
-    def add_file_btn(self, path):
-        name = os.path.basename(path)
-        btn = ctk.CTkButton(self.files_scroll, text=name, fg_color="transparent", border_width=1, 
-                            text_color=("gray10", "gray90"), anchor="w",
-                            command=lambda p=path: self.load_video_editor(p))
-        btn.pack(fill="x", pady=2)
-
-    def load_video_editor(self, path):
-        self.current_edit_file = path
-        self.lbl_current_file.configure(text=f"Fichier: {os.path.basename(path)}")
-        data = self.file_data[path]
+        btn = ctk.CTkButton(self.container, text="LANCER LE RENDU FINAL", height=60, width=300, fg_color="red", font=("Arial", 18, "bold"), command=self.run_final_render)
+        btn.pack(pady=40)
         
-        # If analyzed, show timeline
-        if data["analyzed"]:
-            self.timeline.load_data(data["duration"], data["segments"])
-        else:
-            # Clear timeline or show empty
-            self.timeline.load_data(100, [])
-            self.log("Ce fichier n'est pas encore analysé. Cliquez sur 'Analyser ce fichier'.")
+        self.console = ctk.CTkTextbox(self.container, height=300, width=800)
+        self.console.pack(fill="x", padx=40)
 
-    def on_timeline_edit(self, new_segments):
-        if self.current_edit_file:
-            self.file_data[self.current_edit_file]["segments"] = new_segments
-            # self.log(f"Mise à jour segments pour {os.path.basename(self.current_edit_file)}")
-
-    def analyze_current_ui(self):
-        if not self.current_edit_file: return
-        threading.Thread(target=self._run_single_analysis, args=(self.current_edit_file,)).start()
-
-    def _run_single_analysis(self, path):
-        self.log(f"Analyse de {os.path.basename(path)}...")
-        try:
-            # use global trim settings for this initial analysis
-            s = self.entry_start.get(); e = self.entry_end.get()
-            s_val = float(s) if s else None
-            e_val = float(e) if e else None
-            
-            # Extract duration (hacky: use pydub)
-            audio_path = self.processor.extract_audio(path)
-            from pydub import AudioSegment
-            audio = AudioSegment.from_wav(audio_path)
-            dur_sec = len(audio) / 1000.0
-            
-            segments = self.processor.analyze_segments(audio_path, start_range=s_val, end_range=e_val)
-            
-            # Store
-            self.file_data[path]["duration"] = dur_sec
-            self.file_data[path]["segments"] = segments
-            self.file_data[path]["analyzed"] = True
-            
-            # Update UI
-            if self.current_edit_file == path:
-                 self.after(0, lambda: self.timeline.load_data(dur_sec, segments))
-            self.log(f"Terminé: {len(segments)} segments.")
-            
-        except Exception as e:
-            self.log(f"Erreur: {e}")
-
-    def start_batch_thread(self):
-        if not self.file_data: return
-        threading.Thread(target=self._run_batch).start()
-
-    def _run_batch(self):
-        self.log("=== DÉBUT BATCH ===")
+    def run_final_render(self):
+        threading.Thread(target=self._render_job).start()
         
-        # Globals
-        title = self.entry_title.get()
-        upper = self.chk_upper.get() == 1
-        s_val_g = float(self.entry_start.get()) if self.entry_start.get() else None
-        e_val_g = float(self.entry_end.get()) if self.entry_end.get() else None
-        music = self.entry_music.get()
-        verify = self.chk_verify.get() == 1
-        title_col = self.title_color_hex
-        outline_ass = hex_to_ass(self.sub_color_hex)
-        
-        idx = 0
-        for fpath, data in self.file_data.items():
-            idx += 1
-            fname = os.path.basename(fpath)
-            self.log(f"> Processing {fname}...")
-            
+    def _render_job(self):
+        for i, proj in enumerate(self.projects_data):
+            self.log(f"Rendu {i+1}/{len(self.projects_data)}: {os.path.basename(proj['raw_path'])}...")
             try:
-                # 1. Get Segments (Manual or Auto)
-                if data["analyzed"] and data["segments"]:
-                    segments = data["segments"] # User approved/edited
-                else:
-                    self.log(f"  (Analyse auto...)")
-                    audio_path = self.processor.extract_audio(fpath)
-                    segments = self.processor.analyze_segments(audio_path, start_range=s_val_g, end_range=e_val_g)
+                out = os.path.join(self.processor.cfg.output_dir, f"Final_V4_{i}.mp4")
                 
-                if not segments:
-                    self.log("  ⚠️ Aucun segment. Skip.")
-                    continue
-
-                # 2. Cut
-                concat = os.path.join(self.processor.cfg.temp_dir, f"batch_{idx}.ffconcat")
-                cut_vid = os.path.join(self.processor.cfg.temp_dir, f"batch_{idx}.mp4")
-                self.processor.create_cut_file(fpath, segments, concat)
-                self.processor.render_cut(concat, cut_vid)
+                ass_outline = hex_to_ass(proj["sub_color"])
                 
-                # 3. Transcribe
-                self.log("  Transcription...")
-                wsegs = self.processor.transcribe(cut_vid)
-                srt = os.path.join(self.processor.cfg.temp_dir, f"batch_{idx}.srt")
-                self.processor.generate_srt(wsegs, srt, uppercase=upper)
-                
-                # 4. Verify
-                if verify:
-                    self.log("  🛑 Vérification requise...")
-                    editor_closed = threading.Event()
-                    self.after(0, lambda: SubtitleEditorWindow(self, srt, cut_vid).wait_window() or editor_closed.set())
-                    editor_closed.wait()
-                    
-                # 5. Render
-                self.log("  Rendu final...")
-                out = os.path.join(self.processor.cfg.output_dir, f"Reel_{fname}")
                 self.processor.render_final_video(
-                    cut_vid, srt, out,
-                    title_text=title,
-                    title_color=title_col,
-                    music_path=music,
-                    style_cfg={"outline_color": outline_ass}
+                    proj["cut_path"],
+                    proj["srt_path"],
+                    out,
+                    title_text=proj["title"],
+                    title_color=proj["title_color"],
+                    music_path=proj["music"] if proj["music"] else None,
+                    style_cfg={"outline_color": ass_outline} 
                 )
-                self.log(f"  ✅ Succès: {out}")
-                
+                self.log(f"✅ Terminé: {out}")
             except Exception as e:
-                self.log(f"  ❌ Erreur: {e}")
-                
-        self.log("=== BATCH TERMINÉ ===")
+                self.log(f"❌ Erreur: {e}")
+        self.log("\n✨ TOUS LES RENDUS SONT TERMINÉS !")
+        self.log("Vous pouvez fermer l'application.")
+
+    def log(self, t):
+        self.console.insert("end", t + "\n")
+        self.console.see("end")
+
+    def clear_container(self):
+        for w in self.container.winfo_children():
+            w.destroy()
 
 if __name__ == "__main__":
-    app = VibeApp()
+    app = VibeWizardApp()
     app.mainloop()
