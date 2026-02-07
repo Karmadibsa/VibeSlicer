@@ -545,9 +545,66 @@ class VibeQtApp(QMainWindow):
             self.player_preview.play()
             self.last_clicked_row = row
 
-    # ... (toggle_play_preview and update_ui_timer unchanged) ...
+    def toggle_play_preview(self):
+        if self.player_preview.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player_preview.pause()
+        else:
+            self.player_preview.play()
 
-    # ... (on_timeline_click etc unchanged) ...
+    def update_ui_timer(self):
+        # Update timeline cursor and time label based on player position
+        if self.stack.currentWidget() == self.page_editor:
+            t = self.player_preview.get_time()
+            self.timeline.cursor_pos = t
+            self.timeline.update()
+            self.lbl_time.setText(ms_to_timestamp(t*1000))
+
+    def on_timeline_click(self, t):
+        self.player_preview.set_position(t)
+        self.timeline.cursor_pos = t
+        self.timeline.update()
+
+    def on_timeline_split(self, t):
+        # User wants to split a block at time t
+        # Find which block contains t
+        for i, b in enumerate(self.timeline.blocks):
+            if b["start"] < t < b["end"]:
+                # SPLIT IT!
+                # Block A: start -> t
+                new_a = b.copy()
+                new_a["end"] = t
+                
+                # Block B: t -> end
+                new_b = b.copy()
+                new_b["start"] = t
+                
+                # Replace in list (and timeline blocks)
+                self.timeline.blocks[i] = new_a
+                self.timeline.blocks.insert(i+1, new_b)
+                
+                self.timeline.update()
+                self.rebuild_segment_list(self.timeline.blocks)
+                break
+
+    def pick_title_col(self):
+        c = QColorDialog.getColor()
+        if c.isValid():
+            self.current_project["title_color"] = c.name()
+            self.btn_col_t.setStyleSheet(f"background-color: {c.name()}")
+            
+    def toggle_segment_state(self):
+        row = self.segment_list.currentRow()
+        if row < 0: return
+        
+        # Original block ref in timeline?
+        b = self.timeline.blocks[row] # Assuming 1:1 mapping
+        b["active"] = not b["active"]
+        
+        self.timeline.update()
+        
+        # Update list item
+        item = self.segment_list.item(row)
+        self.update_list_item_visual(item)
 
     def process_and_finish(self):
         # 1. Gather active blocks fully
