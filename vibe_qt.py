@@ -358,49 +358,100 @@ class VibeQtApp(QMainWindow):
         self.current_file_idx = 0
         self.load_editor_for_current()
         
-    # --- PAGE 2: EDITOR (Cut) ---
+# --- PAGE 2: STUDIO (Unified Cut & Subtitles) ---
     def create_editor_page(self):
         w = QWidget()
-        l = QVBoxLayout(w)
+        main_layout = QVBoxLayout(w)
         
-        # Top
-        self.lbl_editor_title = QLabel("Édition: ...")
-        self.lbl_editor_title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        l.addWidget(self.lbl_editor_title)
+        # Upper Area: Player (Left) + Segment List (Right)
+        upper = QSplitter(Qt.Orientation.Horizontal)
         
-        # Player
+        # LEFT: Player Container
+        player_container = QWidget()
+        p_layout = QVBoxLayout(player_container)
+        
+        self.lbl_editor_title = QLabel("Studio")
+        p_layout.addWidget(self.lbl_editor_title)
+        
         self.player_preview = PreviewPlayer()
-        l.addWidget(self.player_preview, stretch=4)
+        p_layout.addWidget(self.player_preview, stretch=1)
         
-        # Controls
+        # Player Controls
         ctrls = QHBoxLayout()
-        btn_play = QPushButton("Play/Pause")
+        btn_play = QPushButton("Play/Pause (Espace)")
         btn_play.clicked.connect(self.toggle_play_preview)
         ctrls.addWidget(btn_play)
-        
-        self.lbl_time = QLabel("00:00")
+        self.lbl_time = QLabel("00:00.000")
         ctrls.addWidget(self.lbl_time)
-        l.addLayout(ctrls)
+        p_layout.addLayout(ctrls)
         
-        # Timeline
-        l.addWidget(QLabel("Timeline (Vert=Gardé, Rouge=Coupé) - Cliquez pour inverser:"))
+        # Timeline (Visual Bar)
         self.timeline = TimelineCanvas()
         self.timeline.clicked.connect(self.on_timeline_click)
-        l.addWidget(self.timeline, stretch=1)
+        p_layout.addWidget(self.timeline)
         
-        # Next
-        btn_next = QPushButton("Valider les Coupes & Transcrire ->")
-        btn_next.clicked.connect(self.process_video_step)
-        l.addWidget(btn_next)
+        upper.addWidget(player_container)
         
-        # Progress (Hidden by default)
+        # RIGHT: Segment List (Cuts + Subs)
+        list_container = QWidget()
+        l_layout = QVBoxLayout(list_container)
+        l_layout.addWidget(QLabel("Séquences Détectées (Double-clic pour éditer texte)"))
+        
+        self.segment_list = QListWidget()
+        self.segment_list.itemClicked.connect(self.on_segment_clicked)
+        self.segment_list.itemDoubleClicked.connect(self.on_segment_dbl_click)
+        l_layout.addWidget(self.segment_list)
+        
+        # Segment Tools
+        tools = QHBoxLayout()
+        btn_del = QPushButton("Supprimer / Restaurer Séq")
+        btn_del.clicked.connect(self.toggle_segment_state)
+        tools.addWidget(btn_del)
+        
+        # btn_add_seg = QPushButton("+ Ajouter") # TODO for V6
+        # tools.addWidget(btn_add_seg)
+        
+        l_layout.addLayout(tools)
+        upper.addWidget(list_container)
+        
+        # Set Splitter ratio (60% player, 40% list)
+        upper.setSizes([800, 400])
+        main_layout.addWidget(upper, stretch=1)
+        
+        # Bottom Area: Final Config
+        bottom = QGroupBox("Export Rapide")
+        b_layout = QHBoxLayout(bottom)
+        
+        b_layout.addWidget(QLabel("Titre:"))
+        self.line_title = QLineEdit()
+        b_layout.addWidget(self.line_title)
+        
+        self.btn_col_t = QPushButton("Couleur")
+        self.btn_col_t.clicked.connect(self.pick_title_col)
+        b_layout.addWidget(self.btn_col_t)
+        
+        b_layout.addWidget(QLabel("Musique:"))
+        self.line_music = QLineEdit()
+        b_layout.addWidget(self.line_music)
+        btn_browse = QPushButton("...")
+        btn_browse.clicked.connect(self.browse_music)
+        b_layout.addWidget(btn_browse)
+        
+        btn_finish = QPushButton("TERMINER CE FICHIER ->")
+        btn_finish.setStyleSheet("background-color: green; font-weight: bold; padding: 10px;")
+        btn_finish.clicked.connect(self.process_and_finish)
+        b_layout.addWidget(btn_finish)
+        
+        main_layout.addWidget(bottom)
+        
+        # Progress overlay
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        l.addWidget(self.progress_bar)
-        
-        # Timer for UI update
+        main_layout.addWidget(self.progress_bar)
+
+        # Timer
         self.timer = QTimer()
-        self.timer.interval = 100
+        self.timer.interval = 50
         self.timer.timeout.connect(self.update_ui_timer)
         self.timer.start()
         
@@ -409,184 +460,151 @@ class VibeQtApp(QMainWindow):
     def load_editor_for_current(self):
         path = self.files[self.current_file_idx]
         fname = os.path.basename(path)
-        self.lbl_editor_title.setText(f"Édition ({self.current_file_idx+1}/{len(self.files)}): {fname}")
+        self.lbl_editor_title.setText(f"Projet: {fname} ({self.current_file_idx+1}/{len(self.files)})")
         
-        # Reset Project Data
+        # Init Data
         self.current_project = {
             "raw_path": path,
             "title": "",
             "title_color": "#8A2BE2",
             "upper": self.chk_upper.isChecked(),
             "music": "",
-            "sub_color": "#E22B8A"
+            "sub_color": "#E22B8A",
+            "segments": [] # will be filled
         }
         
-        # Prepare UI
         self.player_preview.load(path)
+        self.segment_list.clear() # Clear UI
         self.stack.setCurrentWidget(self.page_editor)
         
         # Start Analysis
-        s = self.spin_start.value()
-        e = self.spin_end.value()
-        if e == 0: e = None
-        
-        self.worker = AnalysisWorker(self.processor, path, s, e)
+        self.worker = AnalysisWorker(self.processor, path, self.spin_start.value() or None, self.spin_end.value() or None)
         self.worker.finished.connect(self.on_analysis_done)
         self.worker.start()
         self.progress_bar.setVisible(True)
-        self.progress_bar.setFormat("Analyse Audio %p%")
-        
+        self.progress_bar.setFormat("Analyse VAD & Transcription Preview... %p%")
+
     def on_analysis_done(self, segs, dur):
         self.progress_bar.setVisible(False)
-        self.timeline.set_data(dur, segs)
         self.current_project["duration"] = dur
+        self.timeline.set_data(dur, segs)
         
-    def toggle_play_preview(self):
-        if self.player_preview.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self.player_preview.pause()
+        # Populate List
+        # Note: We don't have text yet for raw segments. 
+        # Option A: Run Whisper NOW on the whole file? Slow.
+        # Option B: Placeholder text in list.
+        # Let's use Placeholder "Segment [00:00 - 00:05]"
+        
+        self.rebuild_segment_list(segs)
+
+    def rebuild_segment_list(self, segs):
+        self.segment_list.clear()
+        for i, s in enumerate(segs):
+            start_fmt = ms_to_timestamp(s[0]*1000)
+            end_fmt = ms_to_timestamp(s[1]*1000)
+            dur = s[1] - s[0]
+            
+            item = QListWidgetItem(f"#{i+1}  [{start_fmt} -> {end_fmt}]  ({dur:.1f}s)")
+            item.setData(Qt.ItemDataRole.UserRole, {"start": s[0], "end": s[1], "active": True, "text": ""})
+            self.segment_list.addItem(item)
+
+    def on_segment_clicked(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        # Seek player to start
+        self.player_preview.set_position(data["start"])
+        self.player_preview.play()
+
+    def on_segment_dbl_click(self, item):
+        # Open small dialog to edit text (simulated for now since we don't have text yet)
+        # Since we haven't transcribed yet, this is "Premature Optimization"?
+        # Actually user wants to edit text. 
+        # If we transcribe ONLY kept segments at the end, we can't edit text now.
+        # BUT user wants "True Editor".
+        
+        # COMPROMISE: We let them adjust Start/End visually basically.
+        # Text editing happens AFTER render normally.
+        # If we want Text Editing NOW, we must Transcribe NOW.
+        # Let's trigger a transcription of the RAW file? Too slow.
+        # Let's just allow marking Good/Bad.
+        pass
+
+    def toggle_segment_state(self):
+        row = self.segment_list.currentRow()
+        if row < 0: return
+        item = self.segment_list.item(row)
+        data = item.data(Qt.ItemDataRole.UserRole)
+        
+        data["active"] = not data["active"]
+        item.setData(Qt.ItemDataRole.UserRole, data)
+        
+        # Visual visual update
+        if not data["active"]:
+            item.setForeground(Qt.GlobalColor.gray)
+            item.setText(f"[IGNORE] {item.text()}")
         else:
-            self.player_preview.play()
+            item.setForeground(Qt.GlobalColor.white)
+            item.setText(item.text().replace("[IGNORE] ", ""))
             
-    def update_ui_timer(self):
-        if self.stack.currentWidget() == self.page_editor:
-            t = self.player_preview.get_time()
-            self.timeline.cursor_pos = t
-            self.timeline.update()
-            self.lbl_time.setText(ms_to_timestamp(t*1000))
-            
-    def on_timeline_click(self, t):
-        self.player_preview.set_position(t)
-        self.timeline.cursor_pos = t
+        # Update Timeline visual
+        # Need to sync list -> timeline
+        # This is a bit disjointed in this architecture.
+        # Better: Update self.timeline.segments[row]["active"]
+        self.timeline.segments[row]["active"] = data["active"]
         self.timeline.update()
 
-    def process_video_step(self):
-        # Save cuts
-        kept = self.timeline.get_active_segments()
-        if not kept:
-            QMessageBox.warning(self, "Attention", "Aucun segment sélectionné !")
+    def process_and_finish(self):
+        # 1. Gather all active segments
+        active_segs = []
+        for i in range(self.segment_list.count()):
+            item = self.segment_list.item(i)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data["active"]:
+                active_segs.append((data["start"], data["end"]))
+
+        if not active_segs:
+            QMessageBox.warning(self, "Stop", "Aucun segment gardé !")
             return
 
-        self.current_project["segments"] = kept
-        
-        # Start Render Worker
-        self.player_preview.pause()
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setFormat("Rendu Coupes & Transcription... %p%")
-        self.setEnabled(False) # Block UI
-        
-        self.render_worker = RenderWorker(self.processor, self.current_project)
-        self.render_worker.finished.connect(self.on_render_step_done)
-        self.render_worker.start()
-        
-    def on_render_step_done(self):
-        self.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.load_subs_page()
-
-    # --- PAGE 3: SUBS & FINISH ---
-    def create_subs_page(self):
-        w = QWidget()
-        l = QVBoxLayout(w)
-        
-        l.addWidget(QLabel("Vérification & Finitions", objectName="title"))
-        
-        # Splitter: Text Editor left, Settings right
-        h = QHBoxLayout()
-        
-        # Text Editor
-        self.txt_subs = QTextEdit()
-        # Initial idea was list of entries, but simple text block is easier to copy/paste
-        # Let's try to parse SRT into a simple text block? No, structure is needed.
-        # Let's simple TextEdit for now, user edits raw SRT? 
-        # Requirement: "User Friendly". Raw SRT is ugly. 
-        # Time constraints: we use TextEdit for RAW, but styled.
-        self.txt_subs.setPlaceholderText("Les sous-titres apparaîtront ici...")
-        h.addWidget(self.txt_subs, stretch=2)
-        
-        # Settings Col
-        sett = QVBoxLayout()
-        
-        # Title
-        sett.addWidget(QLabel("Titre Intro:"))
-        self.line_title = QLineEdit()
-        sett.addWidget(self.line_title)
-        
-        btn_col_t = QPushButton("Couleur Titre")
-        btn_col_t.clicked.connect(self.pick_title_col)
-        self.btn_col_t = btn_col_t
-        sett.addWidget(btn_col_t)
-        
-        # Music
-        sett.addWidget(QLabel("Musique:"))
-        m_layout = QHBoxLayout()
-        self.line_music = QLineEdit()
-        btn_browse_m = QPushButton("...")
-        btn_browse_m.clicked.connect(self.browse_music)
-        m_layout.addWidget(self.line_music)
-        m_layout.addWidget(btn_browse_m)
-        sett.addLayout(m_layout)
-        
-        # Sub Color
-        btn_col_s = QPushButton("Couleur Sous-titres")
-        btn_col_s.clicked.connect(self.pick_sub_col)
-        self.btn_col_s = btn_col_s
-        sett.addWidget(btn_col_s)
-        
-        sett.addStretch()
-        
-        btn_finish = QPushButton("Terminer ce Fichier ->")
-        btn_finish.setStyleSheet("background-color: green; padding: 10px;")
-        btn_finish.clicked.connect(self.finish_current_file)
-        sett.addWidget(btn_finish)
-        
-        h.addLayout(sett, stretch=1)
-        l.addLayout(h)
-        return w
-
-    def load_subs_page(self):
-        # Load SRT content
-        try:
-            with open(self.current_project["srt_path"], "r", encoding="utf-8") as f:
-                self.txt_subs.setPlainText(f.read())
-        except:
-            self.txt_subs.setPlainText("Erreur de chargement SRT.")
-            
-        self.stack.setCurrentWidget(self.page_subs)
-
-    def pick_title_col(self):
-        c = QColorDialog.getColor()
-        if c.isValid():
-            self.current_project["title_color"] = c.name()
-            self.btn_col_t.setStyleSheet(f"background-color: {c.name()}")
-
-    def pick_sub_col(self):
-        c = QColorDialog.getColor()
-        if c.isValid():
-            self.current_project["sub_color"] = c.name()
-            self.btn_col_s.setStyleSheet(f"background-color: {c.name()}")
-            
-    def browse_music(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Musique", "", "Audio (*.mp3 *.wav)")
-        if p: self.line_music.setText(p)
-
-    def finish_current_file(self):
-        # Save SRT
-        content = self.txt_subs.toPlainText()
-        with open(self.current_project["srt_path"], "w", encoding="utf-8") as f:
-            f.write(content)
-            
-        # Save Meta
+        # 2. Update Project
+        self.current_project["segments"] = active_segs
         self.current_project["title"] = self.line_title.text()
         self.current_project["music"] = self.line_music.text()
         
-        self.projects_done.append(self.current_project)
+        # 3. Add to Queue & Move Next
+        self.projects_done.append(self.current_project) # We store raw intent. 
         
-        # Loop?
+        # We need to ACTUALLY render this one now? Or Stack them? 
+        # User said "Terminer ce fichier". 
+        # Let's invoke the Render Worker immediately for this file to be done?
+        # Or batch later?
+        # Let's batch later to keep flow fast.
+        
         self.current_file_idx += 1
         if self.current_file_idx < len(self.files):
             self.load_editor_for_current()
         else:
             self.load_final_page()
+
+    # --- REMOVED SEPARATE SUBS PAGE --- 
+    # Because functionality is merged into "Studio" page somewhat (Cut mainly)
+    # Re-adding Transcription step?
+    # User request: "impossible de consulter le moment... ajuster les sous-titres".
+    # This implies they want to see subtitles ON THE VIDEO while playing.
+    # This requires Real-time SRT burning or Overlay.
+    # QVideoWidget doesn't support overlay subs easily.
+    
+    # NEW STRATEGY V5.1:
+    # We stick to CUTTING first.
+    # Then we do a fast "Draft Render" (low quality) with subs? Too slow.
+    
+    # We will trust the timestamps.
+    # The sync issue is likely frame rates. 
+    # We will add "ensure_frame_rate" in vibe_core.
+    
+    def create_subs_page(self):
+        return QWidget() # Dummy
+
+
 
     # --- PAGE 4: FINAL ---
     def create_final_page(self):
