@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QProgressBar, QSlider, QStackedWidget, QTextEdit,
                              QColorDialog, QSplitter, QStyle, QGroupBox, QSpinBox, QMessageBox)
 from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, QThread
+from PyQt6.QtGui import QColor
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
