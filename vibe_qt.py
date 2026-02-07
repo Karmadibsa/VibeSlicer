@@ -606,6 +606,25 @@ class VibeQtApp(QMainWindow):
 
 
 
+    def toggle_play_preview(self):
+        if self.player_preview.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player_preview.pause()
+        else:
+            self.player_preview.play()
+
+    def update_ui_timer(self):
+        # Update timeline cursor and time label based on player position
+        if self.stack.currentWidget() == self.page_editor:
+            t = self.player_preview.get_time()
+            self.timeline.cursor_pos = t
+            self.timeline.update()
+            self.lbl_time.setText(ms_to_timestamp(t*1000))
+
+    def on_timeline_click(self, t):
+        self.player_preview.set_position(t)
+        self.timeline.cursor_pos = t
+        self.timeline.update()
+
     # --- PAGE 4: FINAL ---
     def create_final_page(self):
         w = QWidget()
