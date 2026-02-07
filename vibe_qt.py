@@ -90,15 +90,33 @@ class AnalysisWorker(QThread):
                 current_t = self.start_r
 
             for seg in whisper_segs:
-                s, e, text = seg.start, seg.end, seg.text.strip()
-                
-                # Gap -> Silence
-                if s > current_t + 0.1:
-                    full_blocks.append({"start": current_t, "end": s, "type": "silence", "text": "", "active": False})
-                
-                # Speech Block
-                full_blocks.append({"start": s, "end": e, "type": "speech", "text": text, "active": True})
-                current_t = e
+                # If words are available, split by words
+                if seg.words:
+                    words = seg.words
+                    # Group into chunks of ~5 words or specific duration? 
+                    # Let's do max 6 words per block for readability.
+                    MAX_WORDS = 6
+                    
+                    for i in range(0, len(words), MAX_WORDS):
+                        chunk = words[i:i+MAX_WORDS]
+                        c_start = chunk[0].start
+                        c_end = chunk[-1].end
+                        c_text = "".join([w.word for w in chunk]).strip()
+                        
+                        # Gap -> Silence
+                        if c_start > current_t + 0.1:
+                           full_blocks.append({"start": current_t, "end": c_start, "type": "silence", "text": "", "active": False})
+                        
+                        full_blocks.append({"start": c_start, "end": c_end, "type": "speech", "text": c_text, "active": True})
+                        current_t = c_end
+                else:
+                    # Fallback to full segment if no words
+                    s, e, text = seg.start, seg.end, seg.text.strip()
+                    if s > current_t + 0.1:
+                        full_blocks.append({"start": current_t, "end": s, "type": "silence", "text": "", "active": False})
+                    
+                    full_blocks.append({"start": s, "end": e, "type": "speech", "text": text, "active": True})
+                    current_t = e
             
             # Final Gap
             effective_end = self.end_r if self.end_r else dur
