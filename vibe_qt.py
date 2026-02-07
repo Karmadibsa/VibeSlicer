@@ -5,6 +5,7 @@ import threading
 import subprocess
 import shutil
 import re
+import time
 
 # Import core logic first (imports torch/faster_whisper) to avoid DLL conflicts with PyQt6
 from vibe_core import VibeProcessor
@@ -136,6 +137,56 @@ class RenderWorker(QThread):
             
         except Exception as e:
             self.progress.emit(f"ERREUR: {str(e)}")
+
+class FinalRenderWorker(QThread):
+    log = pyqtSignal(str)
+    finished = pyqtSignal()
+    
+    def __init__(self, processor, projects):
+        super().__init__()
+        self.processor = processor
+        self.projects = projects
+        
+    def run(self):
+        try:
+            for i, proj in enumerate(self.projects):
+                title = proj.get("title", f"Projet_{i+1}")
+                self.log.emit(f"--- Traitement: {title} ---")
+                
+                # We have 'cut_path' and 'srt_path' ready from previous step
+                cut_vid = proj["cut_path"]
+                srt_path = proj["srt_path"]
+                
+                # Output path
+                ts = int(time.time())
+                final_out = os.path.join(self.processor.cfg.output_dir, f"{title}_{ts}.mp4")
+                
+                # 1. Burn Subtitles
+                self.log.emit("Incrustation des sous-titres...")
+                # Style override?
+                style_opts = {}
+                if "title_color" in proj:
+                    style_opts["PrimaryColour"] = hex_to_ass(proj["title_color"])
+                
+                # If music is added, we burn to temp first, else final
+                burn_out = final_out if not proj.get("music") else final_out.replace(".mp4", "_burned.mp4")
+                
+                self.processor.burn_subtitles(cut_vid, srt_path, burn_out, style=style_opts)
+                
+                # 2. Add Music?
+                if proj.get("music"):
+                    self.log.emit(f"Mixage Audio: {os.path.basename(proj['music'])}")
+                    self.processor.add_background_music(burn_out, proj["music"], final_out, volume=0.15)
+                    # Cleanup temp burned
+                    if os.path.exists(burn_out) and burn_out != final_out:
+                        os.remove(burn_out)
+                    
+                self.log.emit(f"OK -> {final_out}")
+            
+            self.finished.emit()
+            
+        except Exception as e:
+            self.log.emit(f"CRITICAL ERROR: {str(e)}")
 
 # --- CUSTOM WIDGETS ---
 
@@ -470,6 +521,7 @@ class VibeQtApp(QMainWindow):
         
         self.timeline = TimelineCanvas()
         self.timeline.clicked.connect(self.on_timeline_click)
+        self.timeline.split_requested.connect(self.on_timeline_split) # Connect Split Signal
         p_layout.addWidget(self.timeline)
         upper.addWidget(player_container)
         
