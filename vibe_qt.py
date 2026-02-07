@@ -54,9 +54,11 @@ def hex_to_ass(hex_color):
 
 # --- WORKER THREAD ---
 # --- WORKER THREAD ---
+# --- WORKER THREAD ---
 class AnalysisWorker(QThread):
     finished = pyqtSignal(list, float)
     error = pyqtSignal(str)
+    progress = pyqtSignal(str)
     
     def __init__(self, processor, path, start_r=None, end_r=None):
         super().__init__()
@@ -67,45 +69,48 @@ class AnalysisWorker(QThread):
         
     def run(self):
         try:
-            # Get duration
+            self.progress.emit("Extraction Audio...")
             from pydub import AudioSegment
             audio_path = self.processor.extract_audio(self.path)
             audio = AudioSegment.from_wav(audio_path)
             dur = len(audio) / 1000.0
             
-            # Analyze Speech
-            speech_segs = self.processor.analyze_segments(audio_path, start_range=self.start_r, end_range=self.end_r)
+            self.progress.emit("Transcription IA en cours (Ceci permet l'édition)...")
+            # Use Whisper to get text immediately
+            # This returns list of Segment(start, end, text, ...)
+            whisper_segs = self.processor.transcribe(audio_path)
             
-            # PARTITION TIMELINE: Fill gaps with "Silence"
-            # Result: [{"start": 0, "end": 5, "type": "speech"}, {"start": 5, "end": 10, "type": "silence"}, ...]
+            # Convert to our Block format
             full_blocks = []
             current_t = 0.0
             
-            # If start_r is set, silence before it?
+            # Range filtering start
             if self.start_r:
-                full_blocks.append({"start": 0, "end": self.start_r, "type": "silence"})
+                full_blocks.append({"start": 0, "end": self.start_r, "type": "silence", "text": "", "active": False})
                 current_t = self.start_r
 
-            for s, e in speech_segs:
-                # Gap before speech?
-                if s > current_t + 0.1: # 100ms tolerance
-                    full_blocks.append({"start": current_t, "end": s, "type": "silence"})
+            for seg in whisper_segs:
+                s, e, text = seg.start, seg.end, seg.text.strip()
                 
-                # Speech block
-                full_blocks.append({"start": s, "end": e, "type": "speech"})
+                # Gap -> Silence
+                if s > current_t + 0.1:
+                    full_blocks.append({"start": current_t, "end": s, "type": "silence", "text": "", "active": False})
+                
+                # Speech Block
+                full_blocks.append({"start": s, "end": e, "type": "speech", "text": text, "active": True})
                 current_t = e
             
-            # Gap after last speech?
+            # Final Gap
             effective_end = self.end_r if self.end_r else dur
             if current_t < effective_end - 0.1:
-                full_blocks.append({"start": current_t, "end": effective_end, "type": "silence"})
+                full_blocks.append({"start": current_t, "end": effective_end, "type": "silence", "text": "", "active": False})
             
             self.finished.emit(full_blocks, dur)
         except Exception as e:
             self.error.emit(str(e))
 
 class RenderWorker(QThread):
-    progress = pyqtSignal(str) # Log message
+    progress = pyqtSignal(str)
     finished = pyqtSignal()
     
     def __init__(self, processor, project_data):
@@ -116,27 +121,57 @@ class RenderWorker(QThread):
     def run(self):
         try:
             # 1. Cut
-            self.progress.emit(f"Génération du Cut intermédiaire...")
-            # Unique temp name to avoid overwrite in batch if parallel (not parallel here but safe)
+            self.progress.emit(f"Génération du Cut et des Sous-titres...")
             tmp_id = int(time.time())
             concat = os.path.join(self.processor.cfg.temp_dir, f"qt_{tmp_id}.ffconcat")
             cut_vid = os.path.join(self.processor.cfg.temp_dir, f"qt_{tmp_id}.mp4")
             
-            self.processor.create_cut_file(self.data["raw_path"], self.data["segments"], concat)
+            # Filter active segments specifically
+            # We already have active segments computed in 'segments' (tuples), 
+            # BUT we need the TEXT for the SRT.
+            # So we better rely on 'active_blocks' passed in project data.
+            
+            active_blocks = self.data["active_blocks_full"] # List of dicts
+            
+            # Create cut list
+            cut_tuples = [(b["start"], b["end"]) for b in active_blocks]
+            self.processor.create_cut_file(self.data["raw_path"], cut_tuples, concat)
             self.processor.render_cut(concat, cut_vid)
             self.data["cut_path"] = cut_vid
             
-            # 2. Transcribe
-            self.progress.emit("Transcription IA (pour le Rendu Final)...")
-            wsegs = self.processor.transcribe(cut_vid)
-            srt = os.path.join(self.processor.cfg.temp_dir, f"qt_{tmp_id}.srt")
-            self.processor.generate_srt(wsegs, srt, uppercase=self.data["upper"])
-            self.data["srt_path"] = srt
+            # 2. Generate SRT from Blocks (No Re-Transcription)
+            # We must shift timestamps: Block 0 starts at 0. Block 1 starts at len(Block 0).
+            srt_path = os.path.join(self.processor.cfg.temp_dir, f"qt_{tmp_id}.srt")
+            
+            with open(srt_path, "w", encoding="utf-8") as f:
+                curr_srt_time = 0.0
+                idx = 1
+                for b in active_blocks:
+                    dur = b["end"] - b["start"]
+                    # If it's a speech block AND has text, write it
+                    if b["type"] == "speech" and b["text"]:
+                        # Setup time
+                        s_time = curr_srt_time
+                        e_time = curr_srt_time + dur
+                        
+                        # Write SRT
+                        from vibe_core import format_timestamp_srt
+                        text = b["text"]
+                        if self.data.get("upper"): text = text.upper()
+                        
+                        f.write(f"{idx}\n")
+                        f.write(f"{format_timestamp_srt(s_time)} --> {format_timestamp_srt(e_time)}\n")
+                        f.write(f"{text}\n\n")
+                        idx += 1
+                        
+                    curr_srt_time += dur
+            
+            self.data["srt_path"] = srt_path
             
             self.finished.emit()
             
         except Exception as e:
-            self.progress.emit(f"ERREUR: {str(e)}")
+            self.progress.emit(f"ERREUR Render: {str(e)}")
 
 class FinalRenderWorker(QThread):
     log = pyqtSignal(str)
@@ -169,6 +204,8 @@ class FinalRenderWorker(QThread):
                     style_opts["PrimaryColour"] = hex_to_ass(proj["title_color"])
                 if "sub_size" in proj:
                     style_opts["Fontsize"] = str(proj["sub_size"])
+                if "sub_pos" in proj:
+                    style_opts["MarginV"] = str(proj["sub_pos"])
                 
                 # If music is added, we burn to temp first, else final
                 burn_out = final_out if not proj.get("music") else final_out.replace(".mp4", "_burned.mp4")
@@ -428,7 +465,10 @@ class VibeQtApp(QMainWindow):
             "upper": self.chk_upper.isChecked(),
             "music": "",
             "sub_color": "#E22B8A",
-            "segments": [] # will be filled
+            "sub_size": 24,
+            "sub_pos": 30, # Default margin
+            "segments": [],
+            "active_blocks_full": [] 
         }
         
         self.player_preview.load(path)
@@ -438,99 +478,102 @@ class VibeQtApp(QMainWindow):
         # Start Analysis
         self.worker = AnalysisWorker(self.processor, path, self.spin_start.value() or None, self.spin_end.value() or None)
         self.worker.finished.connect(self.on_analysis_done)
+        self.worker.progress.connect(lambda s: self.progress_bar.setFormat(s))
         self.worker.start()
         self.progress_bar.setVisible(True)
-        self.progress_bar.setFormat("Analyse VAD & Transcription Preview... %p%")
+        self.progress_bar.setFormat("Démarrage de l'analyse...")
+
+    def on_analysis_done(self, blocks, dur):
+        self.progress_bar.setVisible(False)
+        self.current_project["duration"] = dur
+        self.timeline.set_data(dur, blocks)
+        self.rebuild_segment_list(blocks)
+
+    def rebuild_segment_list(self, blocks):
+        self.segment_list.clear()
+        for i, b in enumerate(blocks):
+            start_fmt = ms_to_timestamp(b["start"]*1000)
+            end_fmt = ms_to_timestamp(b["end"]*1000)
+            
+            Type = "🗣️" if b["type"] == "speech" else "🤫"
+            Text = f" - {b['text'][:30]}..." if b.get('text') else ""
+            
+            item = QListWidgetItem(f"#{i+1} {Type} [{start_fmt} -> {end_fmt}]{Text}")
+            item.setData(Qt.ItemDataRole.UserRole, b) # Store block ref
+            self.segment_list.addItem(item)
+            self.update_list_item_visual(item)
+
+    def update_list_item_visual(self, item):
+        b = item.data(Qt.ItemDataRole.UserRole)
+        if b["active"]:
+            item.setForeground(Qt.GlobalColor.white)
+            if b["type"] == "speech":
+                item.setBackground(QColor("#1e3a25"))
+            else:
+                item.setBackground(QColor("#1e253a"))
+        else:
+            item.setForeground(Qt.GlobalColor.gray)
+            item.setBackground(Qt.GlobalColor.transparent)
+
+    def on_segment_double_clicked(self, item):
+        # Allow editing text
+        from PyQt6.QtWidgets import QInputDialog
+        b = item.data(Qt.ItemDataRole.UserRole)
+        if b["type"] == "speech":
+            text, ok = QInputDialog.getMultiLineText(self, "Editer Sous-titre", "Texte:", b["text"])
+            if ok:
+                b["text"] = text
+                self.rebuild_segment_list(self.timeline.blocks) # Refresh list display
 
     def on_segment_clicked(self, item):
         row = self.segment_list.row(item)
         modifiers = QApplication.keyboardModifiers()
         
         if modifiers == Qt.KeyboardModifier.ShiftModifier and hasattr(self, 'last_clicked_row'):
-            # Range Selection Logic
             start_row = min(self.last_clicked_row, row)
             end_row = max(self.last_clicked_row, row)
-            
-            # Determine target state based on the clicked item
             target_state = not self.timeline.blocks[row]["active"]
-            
             for i in range(start_row, end_row + 1):
                 b = self.timeline.blocks[i]
                 b["active"] = target_state
-                # Update visual
                 list_item = self.segment_list.item(i)
                 self.update_list_item_visual(list_item)
-                
             self.timeline.update()
         else:
-            # Normal Click behavior (seek)
             data = item.data(Qt.ItemDataRole.UserRole)
             self.player_preview.set_position(data["start"])
             self.player_preview.play()
             self.last_clicked_row = row
 
-    def toggle_play_preview(self):
-        if self.player_preview.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self.player_preview.pause()
-        else:
-            self.player_preview.play()
+    # ... (toggle_play_preview and update_ui_timer unchanged) ...
 
-    def update_ui_timer(self):
-        # Update timeline cursor and time label based on player position
-        if self.stack.currentWidget() == self.page_editor:
-            t = self.player_preview.get_time()
-            self.timeline.cursor_pos = t
-            self.timeline.update()
-            self.lbl_time.setText(ms_to_timestamp(t*1000))
+    # ... (on_timeline_click etc unchanged) ...
 
-    def on_timeline_click(self, t):
-        self.player_preview.set_position(t)
-        self.timeline.cursor_pos = t
-        self.timeline.update()
-
-    def on_timeline_split(self, t):
-        # User wants to split a block at time t
-        # Find which block contains t
-        for i, b in enumerate(self.timeline.blocks):
-            if b["start"] < t < b["end"]:
-                # SPLIT IT!
-                # Block A: start -> t
-                new_a = b.copy()
-                new_a["end"] = t
-                
-                # Block B: t -> end
-                new_b = b.copy()
-                new_b["start"] = t
-                
-                # Replace in list (and timeline blocks)
-                self.timeline.blocks[i] = new_a
-                self.timeline.blocks.insert(i+1, new_b)
-                
-                self.timeline.update()
-                self.rebuild_segment_list(self.timeline.blocks)
-                break
-
-    def pick_title_col(self):
-        c = QColorDialog.getColor()
-        if c.isValid():
-            self.current_project["title_color"] = c.name()
-            self.btn_col_t.setStyleSheet(f"background-color: {c.name()}")
-            
-    def toggle_segment_state(self):
-        row = self.segment_list.currentRow()
-        if row < 0: return
+    def process_and_finish(self):
+        # 1. Gather active blocks fully
+        active_blocks_full = [b for b in self.timeline.blocks if b["active"]]
+        active_segs = [(b["start"], b["end"]) for b in active_blocks_full]
         
-        # Original block ref in timeline?
-        b = self.timeline.blocks[row] # Assuming 1:1 mapping
-        b["active"] = not b["active"]
-        
-        self.timeline.update()
-        
-        # Update list item
-        item = self.segment_list.item(row)
-        self.update_list_item_visual(item)
+        if not active_segs:
+            QMessageBox.warning(self, "Attention", "Tout est rouge ! Vous allez générer une vidéo vide.")
+            return
 
-# --- PAGE 2: STUDIO (Unified) ---
+        self.current_project["segments"] = active_segs
+        self.current_project["active_blocks_full"] = active_blocks_full
+        self.current_project["title"] = self.line_title.text()
+        self.current_project["music"] = self.combo_music.currentData()
+        self.current_project["sub_size"] = self.spin_font_size.value()
+        self.current_project["sub_pos"] = self.slider_pos.value() # Vertical Position
+        
+        self.progress_bar.setVisible(True)
+        self.setEnabled(False)
+        self.render_worker = RenderWorker(self.processor, self.current_project)
+        self.render_worker.finished.connect(self.on_intermediate_done)
+        self.render_worker.progress.connect(lambda s: self.progress_bar.setFormat(s))
+        self.render_worker.start()
+
+    # ...
+
     def create_editor_page(self):
         from PyQt6.QtWidgets import QComboBox
         w = QWidget()
@@ -558,17 +601,18 @@ class VibeQtApp(QMainWindow):
         
         self.timeline = TimelineCanvas()
         self.timeline.clicked.connect(self.on_timeline_click)
-        self.timeline.split_requested.connect(self.on_timeline_split) # Connect Split Signal
+        self.timeline.split_requested.connect(self.on_timeline_split)
         p_layout.addWidget(self.timeline)
         upper.addWidget(player_container)
         
-        # RIGHT: List & Tools
+        # RIGHT: List
         list_container = QWidget()
         l_layout = QVBoxLayout(list_container)
-        l_layout.addWidget(QLabel("Zones (Vert=Parole, Bleu=Silence)"))
+        l_layout.addWidget(QLabel("Zones (Double-clic pour éditer texte)"))
         
         self.segment_list = QListWidget()
         self.segment_list.itemClicked.connect(self.on_segment_clicked)
+        self.segment_list.itemDoubleClicked.connect(self.on_segment_double_clicked)
         l_layout.addWidget(self.segment_list)
         
         btn_toggle = QPushButton("Activer / Désactiver Zone")
@@ -580,7 +624,7 @@ class VibeQtApp(QMainWindow):
         main_layout.addWidget(upper, stretch=1)
         
         # BOTTOM: Export
-        bottom = QGroupBox("Export Rapide")
+        bottom = QGroupBox("Export Rapide & Sous-titres")
         b_layout = QHBoxLayout(bottom)
         
         b_layout.addWidget(QLabel("Titre Intro:"))
@@ -591,14 +635,23 @@ class VibeQtApp(QMainWindow):
         self.btn_col_t.clicked.connect(self.pick_title_col)
         b_layout.addWidget(self.btn_col_t)
         
+        # Font Size
         b_layout.addWidget(QLabel("Taille:"))
         self.spin_font_size = QSpinBox()
         self.spin_font_size.setRange(10, 100)
         self.spin_font_size.setValue(24)
         b_layout.addWidget(self.spin_font_size)
         
+        # Font Pos
+        b_layout.addWidget(QLabel("Hauteur:"))
+        self.slider_pos = QSlider(Qt.Orientation.Horizontal)
+        self.slider_pos.setRange(0, 500) # MarginV from bottom
+        self.slider_pos.setValue(30) # Default
+        self.slider_pos.setToolTip("Hauteur Sous-titres")
+        b_layout.addWidget(self.slider_pos)
+        
         b_layout.addWidget(QLabel("Musique:"))
-        self.combo_music = QComboBox() # Replaces line_music
+        self.combo_music = QComboBox() 
         self.combo_music.setMinimumWidth(150)
         self.refresh_music_library()
         b_layout.addWidget(self.combo_music)
@@ -607,7 +660,7 @@ class VibeQtApp(QMainWindow):
         btn_browse.clicked.connect(self.browse_music_add)
         b_layout.addWidget(btn_browse)
         
-        btn_finish = QPushButton("TERMINER CE FICHIER ->")
+        btn_finish = QPushButton("TERMINER ->")
         btn_finish.setStyleSheet("background-color: green; font-weight: bold; padding: 10px;")
         btn_finish.clicked.connect(self.process_and_finish)
         b_layout.addWidget(btn_finish)

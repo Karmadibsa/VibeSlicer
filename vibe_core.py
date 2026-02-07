@@ -287,7 +287,7 @@ class VibeProcessor:
         """Burns subtitles into video using ffmpeg"""
         # Style formatting for ASS/SRT
         # Default style if none provided (Alignment=2 is Bottom-Center)
-        style_str = "Fontname=Arial,Fontsize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
+        style_str = "Fontname=Arial,Fontsize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=0,Shadow=0,MarginV=30,Alignment=2"
         
         if style:
             # Construct style string from dict
@@ -297,7 +297,7 @@ class VibeProcessor:
             defaults = {
                 "Fontname": "Arial", "Fontsize": "24", 
                 "PrimaryColour": "&HFFFFFF", "OutlineColour": "&H000000",
-                "BorderStyle": "1", "Outline": "2", "Shadow": "0", "MarginV": "30",
+                "BorderStyle": "1", "Outline": "0", "Shadow": "0", "MarginV": "30",
                 "Alignment": "2"
             }
             defaults.update(style)
