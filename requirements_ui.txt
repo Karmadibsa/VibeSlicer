@@ -1,4 +1,0 @@
-customtkinter
-packaging
-Pillow
-matplotlib

@@ -286,8 +286,8 @@ class VibeProcessor:
     def burn_subtitles(self, video_path, srt_path, output_path, style=None):
         """Burns subtitles into video using ffmpeg"""
         # Style formatting for ASS/SRT
-        # Default style if none provided
-        style_str = "Fontname=Arial,Fontsize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=20"
+        # Default style if none provided (Alignment=2 is Bottom-Center)
+        style_str = "Fontname=Arial,Fontsize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
         
         if style:
             # Construct style string from dict
@@ -295,9 +295,10 @@ class VibeProcessor:
             # We can merge with default or build fresh. 
             # Simple merge:
             defaults = {
-                "Fontname": "Arial", "Fontsize": "16", 
+                "Fontname": "Arial", "Fontsize": "24", 
                 "PrimaryColour": "&HFFFFFF", "OutlineColour": "&H000000",
-                "BorderStyle": "1", "Outline": "1", "Shadow": "0", "MarginV": "20"
+                "BorderStyle": "1", "Outline": "2", "Shadow": "0", "MarginV": "30",
+                "Alignment": "2"
             }
             defaults.update(style)
             style_str = ",".join([f"{k}={v}" for k, v in defaults.items()])

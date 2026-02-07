@@ -167,6 +167,8 @@ class FinalRenderWorker(QThread):
                 style_opts = {}
                 if "title_color" in proj:
                     style_opts["PrimaryColour"] = hex_to_ass(proj["title_color"])
+                if "sub_size" in proj:
+                    style_opts["Fontsize"] = str(proj["sub_size"])
                 
                 # If music is added, we burn to temp first, else final
                 burn_out = final_out if not proj.get("music") else final_out.replace(".mp4", "_burned.mp4")
@@ -581,13 +583,19 @@ class VibeQtApp(QMainWindow):
         bottom = QGroupBox("Export Rapide")
         b_layout = QHBoxLayout(bottom)
         
-        b_layout.addWidget(QLabel("Titre:"))
+        b_layout.addWidget(QLabel("Titre Intro:"))
         self.line_title = QLineEdit()
         b_layout.addWidget(self.line_title)
         
-        self.btn_col_t = QPushButton("Couleur")
+        self.btn_col_t = QPushButton("🎨 Couleur Subs")
         self.btn_col_t.clicked.connect(self.pick_title_col)
         b_layout.addWidget(self.btn_col_t)
+        
+        b_layout.addWidget(QLabel("Taille:"))
+        self.spin_font_size = QSpinBox()
+        self.spin_font_size.setRange(10, 100)
+        self.spin_font_size.setValue(24)
+        b_layout.addWidget(self.spin_font_size)
         
         b_layout.addWidget(QLabel("Musique:"))
         self.combo_music = QComboBox() # Replaces line_music
@@ -699,6 +707,7 @@ class VibeQtApp(QMainWindow):
         self.current_project["segments"] = active_segs
         self.current_project["title"] = self.line_title.text()
         self.current_project["music"] = self.combo_music.currentData() # Path
+        self.current_project["sub_size"] = self.spin_font_size.value()
         
         # 2. RUN INTERMEDIATE RENDER (Fix for missing cut_path)
         self.progress_bar.setVisible(True)
