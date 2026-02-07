@@ -228,6 +228,188 @@ class TimelineCanvas(QWidget):
         
         self.clicked.emit(t)
 
+# --- MAIN WINDOW ---
+
+class VibeQtApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("VibeSlicer v5.4 (Studio Pro)")
+        self.resize(1280, 800)
+        self.processor = VibeProcessor()
+        
+        # Data
+        self.files = [] # Paths
+        self.current_file_idx = 0
+        self.projects_done = [] # Completed configs
+        self.current_project = {}
+        
+        # UI Setup
+        self.main_widget = QWidget()
+        self.setCentralWidget(self.main_widget)
+        self.stack = QStackedWidget()
+        
+        main_layout = QVBoxLayout(self.main_widget)
+        main_layout.addWidget(self.stack)
+        
+        # Pages
+        self.page_files = self.create_files_page()
+        self.page_editor = self.create_editor_page()
+        self.page_final = self.create_final_page()
+        
+        self.stack.addWidget(self.page_files)
+        self.stack.addWidget(self.page_editor)
+        self.stack.addWidget(self.page_final)
+        
+        self.apply_styles()
+        
+    def apply_styles(self):
+        self.setStyleSheet(DARK_STYLESHEET)
+        
+    # --- PAGE 1: FILES ---
+    def create_files_page(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        
+        lbl = QLabel("1. Importation des Rushs")
+        lbl.setStyleSheet("font-size: 24px; font-weight: bold; color: #8A2BE2;")
+        layout.addWidget(lbl)
+        
+        # List
+        self.file_list = QListWidget()
+        layout.addWidget(self.file_list)
+        
+        btns = QHBoxLayout()
+        btn_add = QPushButton("+ Ajouter Vidéos")
+        btn_add.clicked.connect(self.add_files)
+        btns.addWidget(btn_add)
+        
+        btn_clear = QPushButton("Effacer Tout")
+        btn_clear.clicked.connect(self.file_list.clear)
+        btns.addWidget(btn_clear)
+        layout.addLayout(btns)
+        
+        # Global Params (Trim)
+        grp = QGroupBox("Paramètres Globaux (Optionnel)")
+        gl = QHBoxLayout()
+        gl.addWidget(QLabel("Début (sec):"))
+        self.spin_start = QSpinBox()
+        self.spin_start.setRange(0, 99999)
+        gl.addWidget(self.spin_start)
+        gl.addWidget(QLabel("Fin (sec):"))
+        self.spin_end = QSpinBox()
+        self.spin_end.setRange(0, 99999)
+        self.spin_end.setValue(0) # 0 means unlimited
+        gl.addWidget(self.spin_end)
+        
+        self.chk_upper = QCheckBox("Forcer Subs MAJUSCULES")
+        gl.addWidget(self.chk_upper)
+        
+        grp.setLayout(gl)
+        layout.addWidget(grp)
+        
+        # Next
+        btn_next = QPushButton("Démarrer le Studio ->")
+        btn_next.setStyleSheet("background-color: #2b8a3e; padding: 15px; font-size: 16px;")
+        btn_next.clicked.connect(self.start_workflow)
+        layout.addWidget(btn_next)
+        
+        return w
+    
+    def add_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Choisir Vidéos", "", "Video Files (*.mp4 *.mov *.mkv)")
+        for p in paths:
+            self.file_list.addItem(p)
+            self.files.append(p)
+
+    def start_workflow(self):
+        if not self.files:
+            QMessageBox.warning(self, "Erreur", "Ajoutez au moins une vidéo !")
+            return
+        
+        self.projects_done = []
+        self.current_file_idx = 0
+        self.load_editor_for_current()
+        
+    def load_editor_for_current(self):
+        path = self.files[self.current_file_idx]
+        fname = os.path.basename(path)
+        self.lbl_editor_title.setText(f"Projet: {fname} ({self.current_file_idx+1}/{len(self.files)})")
+        
+        # Init Data
+        self.current_project = {
+            "raw_path": path,
+            "title": "",
+            "title_color": "#8A2BE2",
+            "upper": self.chk_upper.isChecked(),
+            "music": "",
+            "sub_color": "#E22B8A",
+            "segments": [] # will be filled
+        }
+        
+        self.player_preview.load(path)
+        self.segment_list.clear() # Clear UI
+        self.stack.setCurrentWidget(self.page_editor)
+        
+        # Start Analysis
+        self.worker = AnalysisWorker(self.processor, path, self.spin_start.value() or None, self.spin_end.value() or None)
+        self.worker.finished.connect(self.on_analysis_done)
+        self.worker.start()
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setFormat("Analyse VAD & Transcription Preview... %p%")
+
+    def on_segment_clicked(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        # Seek player to start
+        self.player_preview.set_position(data["start"])
+        self.player_preview.play()
+
+    def toggle_play_preview(self):
+        if self.player_preview.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player_preview.pause()
+        else:
+            self.player_preview.play()
+
+    def update_ui_timer(self):
+        # Update timeline cursor and time label based on player position
+        if self.stack.currentWidget() == self.page_editor:
+            t = self.player_preview.get_time()
+            self.timeline.cursor_pos = t
+            self.timeline.update()
+            self.lbl_time.setText(ms_to_timestamp(t*1000))
+
+    def on_timeline_click(self, t):
+        self.player_preview.set_position(t)
+        self.timeline.cursor_pos = t
+        self.timeline.update()
+
+    def on_timeline_split(self, t):
+        # User wants to split a block at time t
+        # Find which block contains t
+        for i, b in enumerate(self.timeline.blocks):
+            if b["start"] < t < b["end"]:
+                # SPLIT IT!
+                # Block A: start -> t
+                new_a = b.copy()
+                new_a["end"] = t
+                
+                # Block B: t -> end
+                new_b = b.copy()
+                new_b["start"] = t
+                
+                # Replace in list (and timeline blocks)
+                self.timeline.blocks[i] = new_a
+                self.timeline.blocks.insert(i+1, new_b)
+                
+                self.timeline.update()
+                self.rebuild_segment_list(self.timeline.blocks)
+                break
+
+    def pick_title_col(self):
+        c = QColorDialog.getColor()
+        if c.isValid():
+            self.current_project["title_color"] = c.name()
+            self.btn_col_t.setStyleSheet(f"background-color: {c.name()}")
+
 # --- PAGE 2: STUDIO (Unified) ---
     def create_editor_page(self):
         from PyQt6.QtWidgets import QComboBox
