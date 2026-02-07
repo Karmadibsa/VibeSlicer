@@ -140,6 +140,7 @@ class RenderWorker(QThread):
 
 class TimelineCanvas(QWidget):
     clicked = pyqtSignal(float) # Emits timestamp
+    split_requested = pyqtSignal(float) # Emits timestamp for split
     
     def __init__(self):
         super().__init__()
@@ -212,7 +213,13 @@ class TimelineCanvas(QWidget):
         w = self.width()
         t = (x / w) * self.duration
         
-        # Toggle block
+        # Check SHIFT key
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers == Qt.KeyboardModifier.ShiftModifier:
+            self.split_requested.emit(t)
+            return
+
+        # Normal Click: Toggle block
         for b in self.blocks:
             if b["start"] <= t <= b["end"]:
                 b["active"] = not b["active"]
