@@ -230,6 +230,37 @@ class TimelineCanvas(QWidget):
 
 # --- MAIN WINDOW ---
 
+class PreviewPlayer(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0,0,0,0)
+        
+        self.video_widget = QVideoWidget()
+        self.layout.addWidget(self.video_widget)
+        
+        self.player = QMediaPlayer()
+        self.audio = QAudioOutput()
+        self.player.setAudioOutput(self.audio)
+        self.player.setVideoOutput(self.video_widget)
+    
+    def load(self, path):
+        self.player.setSource(QUrl.fromLocalFile(path))
+        
+    def set_position(self, seconds):
+        self.player.setPosition(int(seconds * 1000))
+        
+    def play(self):
+        self.player.play()
+        
+    def pause(self):
+        self.player.pause()
+        
+    def get_time(self):
+        return self.player.position() / 1000.0
+
+# --- MAIN WINDOW ---
+
 class VibeQtApp(QMainWindow):
     def __init__(self):
         super().__init__()
