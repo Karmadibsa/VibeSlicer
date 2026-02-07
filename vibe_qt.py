@@ -625,6 +625,16 @@ class VibeQtApp(QMainWindow):
         self.timeline.cursor_pos = t
         self.timeline.update()
 
+    def pick_title_col(self):
+        c = QColorDialog.getColor()
+        if c.isValid():
+            self.current_project["title_color"] = c.name()
+            self.btn_col_t.setStyleSheet(f"background-color: {c.name()}")
+
+    def browse_music(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Musique", "", "Audio (*.mp3 *.wav)")
+        if p: self.line_music.setText(p)
+
     # --- PAGE 4: FINAL ---
     def create_final_page(self):
         w = QWidget()
