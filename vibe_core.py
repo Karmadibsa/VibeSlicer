@@ -282,3 +282,49 @@ class VibeProcessor:
             
         else:
             shutil.copy(video_no_music, output_path)
+
+    def burn_subtitles(self, video_path, srt_path, output_path, style=None):
+        """Burns subtitles into video using ffmpeg"""
+        # Style formatting for ASS/SRT
+        # Default style if none provided
+        style_str = "Fontname=Arial,Fontsize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=20"
+        
+        if style:
+            # Construct style string from dict
+            # Example: style={"PrimaryColour": "&H00FFFF"}
+            # We can merge with default or build fresh. 
+            # Simple merge:
+            defaults = {
+                "Fontname": "Arial", "Fontsize": "16", 
+                "PrimaryColour": "&HFFFFFF", "OutlineColour": "&H000000",
+                "BorderStyle": "1", "Outline": "1", "Shadow": "0", "MarginV": "20"
+            }
+            defaults.update(style)
+            style_str = ",".join([f"{k}={v}" for k, v in defaults.items()])
+
+        # Escape paths for ffmpeg filter
+        srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+        
+        cmd = [
+            "ffmpeg", "-y", 
+            "-i", video_path,
+            "-vf", f"subtitles='{srt_escaped}':force_style='{style_str}'",
+            "-c:a", "copy",
+            output_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+    def add_background_music(self, video_path, music_path, output_path, volume=0.1):
+        """Mixes background music with video audio"""
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", music_path,
+            "-filter_complex", f"[1:a]volume={volume}[bgm];[0:a][bgm]amix=inputs=2:duration=first[aout]",
+            "-map", "0:v",
+            "-map", "[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            output_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)

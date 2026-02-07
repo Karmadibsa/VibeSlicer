@@ -265,9 +265,9 @@ class TimelineCanvas(QWidget):
         w = self.width()
         t = (x / w) * self.duration
         
-        # Check SHIFT key
+        # Check ALT key for splitting
         modifiers = QApplication.keyboardModifiers()
-        if modifiers == Qt.KeyboardModifier.ShiftModifier:
+        if modifiers == Qt.KeyboardModifier.AltModifier:
             self.split_requested.emit(t)
             return
 
@@ -441,10 +441,31 @@ class VibeQtApp(QMainWindow):
         self.progress_bar.setFormat("Analyse VAD & Transcription Preview... %p%")
 
     def on_segment_clicked(self, item):
-        data = item.data(Qt.ItemDataRole.UserRole)
-        # Seek player to start
-        self.player_preview.set_position(data["start"])
-        self.player_preview.play()
+        row = self.segment_list.row(item)
+        modifiers = QApplication.keyboardModifiers()
+        
+        if modifiers == Qt.KeyboardModifier.ShiftModifier and hasattr(self, 'last_clicked_row'):
+            # Range Selection Logic
+            start_row = min(self.last_clicked_row, row)
+            end_row = max(self.last_clicked_row, row)
+            
+            # Determine target state based on the clicked item
+            target_state = not self.timeline.blocks[row]["active"]
+            
+            for i in range(start_row, end_row + 1):
+                b = self.timeline.blocks[i]
+                b["active"] = target_state
+                # Update visual
+                list_item = self.segment_list.item(i)
+                self.update_list_item_visual(list_item)
+                
+            self.timeline.update()
+        else:
+            # Normal Click behavior (seek)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            self.player_preview.set_position(data["start"])
+            self.player_preview.play()
+            self.last_clicked_row = row
 
     def toggle_play_preview(self):
         if self.player_preview.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -492,6 +513,20 @@ class VibeQtApp(QMainWindow):
         if c.isValid():
             self.current_project["title_color"] = c.name()
             self.btn_col_t.setStyleSheet(f"background-color: {c.name()}")
+            
+    def toggle_segment_state(self):
+        row = self.segment_list.currentRow()
+        if row < 0: return
+        
+        # Original block ref in timeline?
+        b = self.timeline.blocks[row] # Assuming 1:1 mapping
+        b["active"] = not b["active"]
+        
+        self.timeline.update()
+        
+        # Update list item
+        item = self.segment_list.item(row)
+        self.update_list_item_visual(item)
 
 # --- PAGE 2: STUDIO (Unified) ---
     def create_editor_page(self):
