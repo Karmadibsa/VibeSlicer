@@ -5,6 +5,10 @@ import threading
 import subprocess
 import shutil
 import re
+
+# Import core logic first (imports torch/faster_whisper) to avoid DLL conflicts with PyQt6
+from vibe_core import VibeProcessor
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QListWidget,
                              QListWidgetItem, QFileDialog, QLineEdit, QCheckBox,
@@ -13,8 +17,6 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, QThread
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
-
-from vibe_core import VibeProcessor
 
 # --- STYLES ---
 DARK_STYLESHEET = """
