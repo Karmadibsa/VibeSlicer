@@ -266,7 +266,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Poppins,80,&H00FFFFFF,&H000000FF,&H00E22B8A,&H00000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,640,1
+Style: Default,Poppins,100,&H00FFFFFF,&H000000FF,&H00E22B8A,&H00000000,-1,0,0,0,100,100,0,0,1,5,2,2,10,10,640,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -331,38 +331,62 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # === UTILS: FAST CUTTING ===
     def fast_cut_concat(self, video_path, segments, output_path):
         """
-        Coupe et concatène rapidement la vidéo selon les segments (Keep=True)
-        Utilise le protocole ffconcat pour éviter le ré-encodage si possible, 
-        ou un ré-encodage rapide pour la fluidité.
+        Coupe et concatène la vidéo selon les segments.
+        Utilise une approche robuste: découpe chaque segment puis concat.
         """
-        concat_file = os.path.join(self.temp_dir, "cuts.ffconcat")
+        if not segments:
+            return video_path
         
-        # Chemins absolus ou relatifs ? Relatifs si CWD=temp_dir
-        # On va écrire le ffconcat avec des chemins absolus échappés pour être sûr
         video_abs = self._get_ffmpeg_path(video_path)
+        temp_segments = []
         
-        with open(concat_file, "w", encoding="utf-8") as f:
-            f.write("ffconcat version 1.0\n")
-            for start, end in segments:
-                f.write(f"file '{video_abs}'\n")
-                f.write(f"inpoint {start:.3f}\n")
-                f.write(f"outpoint {end:.3f}\n")
+        # Phase 1: Découper chaque segment individuellement
+        for i, (start, end) in enumerate(segments):
+            duration = end - start
+            seg_file = os.path.join(self.temp_dir, f"seg_{i:03d}.ts")
+            temp_segments.append(seg_file)
+            
+            # Utiliser le format TS (MPEG-TS) qui gère mieux le concat audio
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start),           # Seek avant -i (plus rapide)
+                "-i", video_abs,
+                "-t", str(duration),
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                "-avoid_negative_ts", "make_zero",  # Corriger les timestamps 
+                seg_file
+            ]
+            self._run_ffmpeg(cmd, cwd=self.temp_dir)
         
-        # Rendu du cut
-        # On ré-encode en ultrafast pour éviter les glitches de concaténation de timestamps
-        # C'est nécessaire pour que la timeline MP4 soit propre pour Whisper derrière
+        # Phase 2: Concaténer avec le protocol concat
+        concat_list = os.path.join(self.temp_dir, "concat_list.txt")
+        with open(concat_list, "w", encoding="utf-8") as f:
+            for seg_file in temp_segments:
+                # Chemin relatif car on exécute dans temp_dir
+                f.write(f"file '{os.path.basename(seg_file)}'\n")
         
+        # Concat avec ré-encodage pour avoir une timeline propre
         cmd = [
-            "ffmpeg", "-y", 
-            "-f", "concat", "-safe", "0", 
-            "-i", concat_file,
-            "-c:v", "libx264", "-preset", "ultrafast",
-            "-c:a", "aac", "-ar", "44100",
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", concat_list,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k",
+            "-movflags", "+faststart",
             output_path
         ]
         
-        logger.info(f"Fast cutting to {output_path}...")
+        logger.info(f"Concatenating {len(temp_segments)} segments...")
         self._run_ffmpeg(cmd, cwd=self.temp_dir)
+        
+        # Cleanup segments temporaires
+        for seg_file in temp_segments:
+            try:
+                os.remove(seg_file)
+            except:
+                pass
+        
         return output_path
 
     # === STEP 5: FINAL RENDER ===

@@ -245,42 +245,58 @@ class SmartVideoEngine:
     def smart_cut(self, video_path: Path, 
                   segments: List[Tuple[float, float]]) -> Path:
         """
-        Découpe intelligente SANS ré-encodage complet
-        
-        Utilise le protocole concat avec timestamps pour éviter
-        la perte de qualité et la désynchronisation
+        Découpe intelligente avec timeline audio continue.
+        Utilise le format TS intermédiaire pour éviter les gaps audio.
         """
         if not segments:
             return video_path
         
         output_path = self.temp_dir / "cut_video.mp4"
-        concat_file = self.temp_dir / "cuts.ffconcat"
+        video_str = str(Path(video_path).resolve())
+        temp_segments = []
         
-        video_abs = str(Path(video_path).resolve()).replace("\\", "/")
+        # Phase 1: Découper chaque segment en .ts
+        for i, (start, end) in enumerate(segments):
+            duration = end - start
+            seg_file = self.temp_dir / f"seg_{i:03d}.ts"
+            temp_segments.append(seg_file)
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start),
+                "-i", video_str,
+                "-t", str(duration),
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                "-avoid_negative_ts", "make_zero",
+                str(seg_file)
+            ]
+            self._run_ffmpeg(cmd)
         
-        # Créer le fichier concat
-        with open(concat_file, "w", encoding="utf-8") as f:
-            f.write("ffconcat version 1.0\n")
-            for start, end in segments:
-                f.write(f"file '{video_abs}'\n")
-                f.write(f"inpoint {start:.3f}\n")
-                f.write(f"outpoint {end:.3f}\n")
+        # Phase 2: Concaténer
+        concat_list = self.temp_dir / "concat_list.txt"
+        with open(concat_list, "w", encoding="utf-8") as f:
+            for seg_file in temp_segments:
+                f.write(f"file '{seg_file.name}'\n")
         
-        logger.info(f"Smart cutting {len(segments)} segments...")
-        
-        # Ré-encoder pour avoir une timeline propre
-        # (Nécessaire pour que Whisper fonctionne correctement)
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
-            "-i", str(concat_file),
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-            "-g", "60",                  # Keyframes réguliers
-            "-c:a", "aac", "-ar", "44100",
+            "-i", str(concat_list),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k",
+            "-movflags", "+faststart",
             str(output_path)
         ]
         
         success, _ = self._run_ffmpeg(cmd)
+        
+        # Cleanup
+        for seg_file in temp_segments:
+            try:
+                seg_file.unlink()
+            except:
+                pass
         
         if not success:
             raise RuntimeError("Smart cut failed")
@@ -290,7 +306,7 @@ class SmartVideoEngine:
     def generate_ass(self, subtitles: List[dict], 
                      output_path: Path,
                      font_name: str = "Poppins",
-                     font_size: int = 80,
+                     font_size: int = 100,
                      margin_v: int = 640,
                      highlight_words: List[str] = None) -> Path:
         """
