@@ -646,6 +646,11 @@ class VibeQtApp(QMainWindow):
             self.current_project["title_color"] = c.name()
             self.btn_col_t.setStyleSheet(f"background-color: {c.name()}")
             
+    def edit_current_text(self):
+        item = self.segment_list.currentItem()
+        if item:
+            self.on_segment_double_clicked(item)
+
     def toggle_segment_state(self):
         row = self.segment_list.currentRow()
         if row < 0: return
@@ -728,12 +733,18 @@ class VibeQtApp(QMainWindow):
         # RIGHT: List
         list_container = QWidget()
         l_layout = QVBoxLayout(list_container)
-        l_layout.addWidget(QLabel("Zones (Double-clic pour éditer texte)"))
+        # Clearer Label
+        l_layout.addWidget(QLabel("📝 Séquences & Sous-titres (Double-clic pour éditer)"))
         
         self.segment_list = QListWidget()
         self.segment_list.itemClicked.connect(self.on_segment_clicked)
         self.segment_list.itemDoubleClicked.connect(self.on_segment_double_clicked)
         l_layout.addWidget(self.segment_list)
+        
+        # Edit Text Button
+        btn_edit_txt = QPushButton("✏️ Modifier le Texte (ou Double-clic)")
+        btn_edit_txt.clicked.connect(self.edit_current_text)
+        l_layout.addWidget(btn_edit_txt)
         
         btn_toggle = QPushButton("Activer / Désactiver Zone")
         btn_toggle.clicked.connect(self.toggle_segment_state)
