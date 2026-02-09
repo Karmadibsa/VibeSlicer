@@ -233,7 +233,8 @@ class VibeslicerApp(ctk.CTk):
         
         # State
         self.current_step = 0
-        self.video_path = None
+        self.video_path = None # Raw path
+        self.clean_video_path = None # Sanitized path (CFR 30fps)
         self.video_duration = 0
         self.segments = []
         self.cut_video_path = None
@@ -389,25 +390,40 @@ class VibeslicerApp(ctk.CTk):
     
     def _select_video(self, name):
         self.video_path = os.path.join(INPUT_DIR, name)
+        self.log(f"✅ Sélection : {name}")
         
+        # Launch Sanitization Thread
+        self.video_info.configure(text="⏳ Nettoyage vidéo (Sync Audio/Vidéo)...")
+        threading.Thread(target=self._sanitize_thread, daemon=True).start()
+
+    def _sanitize_thread(self):
         try:
-            cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", self.video_path]
+            if not self.processor:
+                from karmakut_backend import VibeProcessor, VideoConfig
+                self.processor = VibeProcessor()
+            
+            # SANITIZE STEP
+            self.clean_video_path = self.processor.sanitize_video(self.video_path)
+            self.log(f"✨ Vidéo prête : {os.path.basename(self.clean_video_path)}")
+            
+            # Update Info with Clean Video
+            cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", self.clean_video_path]
             result = subprocess.run(cmd, capture_output=True, text=True)
             self.video_duration = float(result.stdout.strip())
-        except:
-            self.video_duration = 60
-        
-        status = "(déjà traitée)" if name in self.processed_videos else ""
-        self.video_info.configure(text=f"✅ {name} • {self.video_duration:.0f}s {status}")
-        
-        if CV2_AVAILABLE:
-            cap = cv2.VideoCapture(self.video_path)
-            ret, frame = cap.read()
-            if ret:
-                self._show_frame_on_canvas(frame, self.preview_canvas)
-            cap.release()
-        
-        self.log(f"✅ {name}")
+            
+            self.after(0, lambda: self.video_info.configure(text=f"✅ Prêt • {self.video_duration:.0f}s"))
+            
+            # Show preview of CLEAN video
+            if CV2_AVAILABLE:
+                cap = cv2.VideoCapture(self.clean_video_path)
+                ret, frame = cap.read()
+                if ret:
+                    self.after(0, lambda: self._show_frame_on_canvas(frame, self.preview_canvas))
+                cap.release()
+
+        except Exception as e:
+            self.log(f"❌ Erreur nettoyage: {e}")
+            self.after(0, lambda: self.video_info.configure(text="❌ Erreur nettoyage", text_color=ERROR))
     
     def _show_frame_on_canvas(self, frame, canvas):
         h, w = frame.shape[:2]
@@ -641,7 +657,11 @@ class VibeslicerApp(ctk.CTk):
             else:
                 self.processor.cfg.silence_thresh = int(self.thresh_slider.get())
             
-            audio_path = self.processor.extract_audio(self.video_path)
+            if not self.clean_video_path:
+                self.log("⚠️ Vidéo non nettoyée, attente...")
+                return
+
+            audio_path = self.processor.extract_audio(self.clean_video_path)
             raw_segments = self.processor.analyze_silence(audio_path)
             
             self.segments = []
@@ -660,7 +680,7 @@ class VibeslicerApp(ctk.CTk):
             
             if not self.player and CV2_AVAILABLE:
                 self.player = VideoPlayer(self.player_canvas, self._on_player_frame)
-                self.player.load(self.video_path)
+                self.player.load(self.clean_video_path)
             
             self.after(0, self._draw_timeline)
             self.after(0, self._update_seg_list_full)
@@ -773,10 +793,11 @@ class VibeslicerApp(ctk.CTk):
             
             for i, (start, end) in enumerate(segments):
                 cut_file = os.path.join(TEMP_DIR, f"cut_{i}.mp4")
-                # Force sampling rate 44100 to fix pitch issues
-                cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", self.video_path,
+                # Use CLEAN video for cutting
+                # No need for complex filters as input is already sanitized
+                cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", self.clean_video_path,
                        "-t", str(end - start), "-c:v", "libx264", "-preset", "ultrafast",
-                       "-c:a", "aac", "-b:a", "192k", "-ar", "44100", cut_file]
+                       "-c:a", "aac", cut_file]
                 subprocess.run(cmd, capture_output=True)
                 cuts.append(cut_file)
             
@@ -1162,8 +1183,8 @@ class VibeslicerApp(ctk.CTk):
     
     def _next_step(self):
         if self.current_step == 0:
-            if not self.video_path:
-                self.log("⚠️ Sélectionnez une vidéo")
+            if not self.clean_video_path:
+                self.log("⏳ Attendez la fin du nettoyage...")
                 return
             # Auto-analyze when going to step 2
             self._show_step(1)
