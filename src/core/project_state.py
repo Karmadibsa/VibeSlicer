@@ -13,6 +13,8 @@ class EventType(enum.Enum):
     SUBTITLES_CHANGED = "SUBTITLES_CHANGED"
     TIME_UPDATED = "TIME_UPDATED"
     PLAYBACK_STATE_CHANGED = "PLAYBACK_STATE_CHANGED"
+    SEEK_REQUESTED = "SEEK_REQUESTED"
+    EXPORT_REQUESTED = "EXPORT_REQUESTED"
     
 @dataclass
 class Segment:
@@ -111,3 +113,11 @@ class ProjectState:
         """Met à jour l'état lecture/pause"""
         self.is_playing = is_playing
         self._notify(EventType.PLAYBACK_STATE_CHANGED, self.is_playing)
+        
+    def request_seek(self, time: float):
+        """Demande un saut temporel (UI -> Player)"""
+        self._notify(EventType.SEEK_REQUESTED, time)
+        
+    def request_export(self, output_path: Path):
+        """Demande d'export (UI -> Processor)"""
+        self._notify(EventType.EXPORT_REQUESTED, output_path)
