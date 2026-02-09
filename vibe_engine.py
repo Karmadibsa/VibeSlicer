@@ -262,10 +262,11 @@ class VibeEngine:
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
+WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Poppins,60,&H00FFFFFF,&H000000FF,&H00E22B8A,&H00000000,-1,0,0,0,100,100,0,0,1,3,2,2,10,10,350,1
+Style: Default,Poppins,80,&H00FFFFFF,&H000000FF,&H00E22B8A,&H00000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,640,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -397,23 +398,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         inputs = ["-i", vid_rel]
         
         if music_path:
-            # Pour la musique, on utilise le chemin absolu mais FFmpeg le gère bien
-            # car ce n'est pas dans un filtre
+            # Pour la musique, on utilise le chemin absolu
             mus_abs = os.path.abspath(music_path)
             inputs.extend(["-i", mus_abs])
+            # Filtre simplifié - pas de loudnorm qui peut causer des coupures
+            # aloop pour boucler la musique, volume réduit, amix pour mixer
             filter_complex = (
-                f"[1:a]aloop=loop=-1:size=2e9,volume=0.1[bgm];"
-                f"[0:a][bgm]amix=inputs=2:duration=first[mixed];"
-                f"[mixed]loudnorm=I=-16:TP=-1.5:LRA=11[aout];"
+                f"[1:a]aloop=loop=-1:size=2e9,volume={0.15}[bgm];"
+                f"[0:a]volume=1.0[voice];"
+                f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout];"
                 f"[0:v]{vf}[vout]"
             )
             maps = ["-map", "[vout]", "-map", "[aout]"]
         else:
-            filter_complex = (
-                f"[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout];"
-                f"[0:v]{vf}[vout]"
-            )
-            maps = ["-map", "[vout]", "-map", "[aout]"]
+            # Sans musique, juste la vidéo avec son original
+            filter_complex = f"[0:v]{vf}[vout]"
+            maps = ["-map", "[vout]", "-map", "0:a"]
         
         cmd = ["ffmpeg", "-y"]
         cmd.extend(inputs)
@@ -421,7 +421,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         cmd.extend(maps)
         cmd.extend([
             "-c:v", "libx264", "-preset", "medium", "-crf", "23",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-shortest",  # Arrêter quand le stream le plus court finit
             output_path
         ])
         
