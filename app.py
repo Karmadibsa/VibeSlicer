@@ -611,13 +611,14 @@ class VibeslicerApp(ctk.CTk):
             self.after_cancel(self._analyze_timer)
         self._analyze_timer = self.after(600, self._analyze)
         
+    
     def _analyze(self, callback=None):
         """Analyse la vidéo"""
-        if self.analyze_btn.cget("state") == "disabled":
+        if getattr(self, '_is_analyzing', False):
             return
         
         self.log("🔍 Analyse auto...")
-        self.analyze_btn.configure(state="disabled", text="⏳...")
+        self._is_analyzing = True
         threading.Thread(target=self._analyze_thread, args=(callback,), daemon=True).start()
     
     def _analyze_thread(self, callback=None):
@@ -647,7 +648,7 @@ class VibeslicerApp(ctk.CTk):
             
             self.log(f"✅ {len(self.segments)} segments")
             
-            if CV2_AVAILABLE:
+            if not self.player and CV2_AVAILABLE:
                 self.player = VideoPlayer(self.player_canvas, self._on_player_frame)
                 self.player.load(self.video_path)
             
@@ -659,8 +660,10 @@ class VibeslicerApp(ctk.CTk):
             
         except Exception as e:
             self.log(f"❌ {e}")
-    
-    def _draw_timeline(self):
+            import traceback
+            traceback.print_exc()
+        finally:
+            self._is_analyzing = False
         self.timeline_canvas.delete("all")
         if not self.segments:
             return
