@@ -550,7 +550,10 @@ class VibeQtApp(QMainWindow):
             end_fmt = ms_to_timestamp(b["end"]*1000)
             
             Type = "🗣️" if b["type"] == "speech" else "🤫"
-            Text = f" - {b['text'][:30]}..." if b.get('text') else ""
+            # Show FULL text on a new line if available
+            Text = ""
+            if b.get('text'):
+                Text = f"\n   ➜ {b['text']}"
             
             item = QListWidgetItem(f"#{i+1} {Type} [{start_fmt} -> {end_fmt}]{Text}")
             item.setData(Qt.ItemDataRole.UserRole, b) # Store block ref
