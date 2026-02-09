@@ -336,7 +336,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     def fast_cut_concat(self, video_path, segments, output_path):
         """
         Coupe et concatène la vidéo selon les segments.
-        Utilise une approche robuste: découpe chaque segment puis concat.
+        Utilise une approche précise pour la synchronisation A/V.
         """
         if not segments:
             return video_path
@@ -344,39 +344,42 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         video_abs = self._get_ffmpeg_path(video_path)
         temp_segments = []
         
-        # Phase 1: Découper chaque segment individuellement
+        # Phase 1: Découper chaque segment avec PRECISION (pas de keyframe seek)
         for i, (start, end) in enumerate(segments):
             duration = end - start
             seg_file = os.path.join(self.temp_dir, f"seg_{i:03d}.ts")
             temp_segments.append(seg_file)
             
-            # Utiliser le format TS (MPEG-TS) qui gère mieux le concat audio
+            # -ss APRES -i = précision à la frame (plus lent mais sync parfait)
+            # -async 1 = resync audio au début de chaque segment
             cmd = [
                 "ffmpeg", "-y",
-                "-ss", str(start),           # Seek avant -i (plus rapide)
                 "-i", video_abs,
-                "-t", str(duration),
+                "-ss", f"{start:.3f}",           # Seek APRES -i (précis)
+                "-t", f"{duration:.3f}",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-avoid_negative_ts", "make_zero",  # Corriger les timestamps 
+                "-async", "1",                    # Sync audio au start
+                "-vsync", "cfr",                  # Constant frame rate
+                "-avoid_negative_ts", "make_zero",
                 seg_file
             ]
             self._run_ffmpeg(cmd, cwd=self.temp_dir)
         
-        # Phase 2: Concaténer avec le protocol concat
+        # Phase 2: Concaténer les segments
         concat_list = os.path.join(self.temp_dir, "concat_list.txt")
         with open(concat_list, "w", encoding="utf-8") as f:
             for seg_file in temp_segments:
-                # Chemin relatif car on exécute dans temp_dir
                 f.write(f"file '{os.path.basename(seg_file)}'\n")
         
-        # Concat avec ré-encodage pour avoir une timeline propre
+        # Concat avec ré-encodage complet pour timeline propre
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
             "-i", concat_list,
             "-c:v", "libx264", "-preset", "fast", "-crf", "22",
             "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k",
+            "-async", "1",
             "-movflags", "+faststart",
             output_path
         ]

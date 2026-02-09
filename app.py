@@ -1185,32 +1185,45 @@ class VibeslicerApp(ctk.CTk):
         
         # 1. Extract first frame as image
         frame_path = os.path.join(TEMP_DIR, "first_frame.jpg")
-        subprocess.run(["ffmpeg", "-y", "-i", self.cut_video_path, "-vframes", "1", frame_path], capture_output=True)
+        subprocess.run(["ffmpeg", "-y", "-i", self.cut_video_path, "-vframes", "1", frame_path], 
+                      capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         
         # 2. Loop image for 2s with blur and text
-        # Escape text for drawtext
         clean_title = title_text.replace("'", "").replace(":", "\\:")
         
         # Use Poppins font if available
         poppins = os.path.join(ASSETS_DIR, "Poppins-Bold.ttf").replace("\\", "/").replace(":", "\\:")
         font_opt = f":fontfile='{poppins}'" if os.path.exists(os.path.join(ASSETS_DIR, "Poppins-Bold.ttf")) else ""
         
+        # Créer l'intro avec audio silencieux à 44100Hz (même rate que la vidéo coupée)
         cmd = [
-            "ffmpeg", "-y", "-loop", "1", "-i", frame_path,
-            "-f", "lavfi", "-i", "anullsrc",  # Silent audio
-            "-vf", f"boxblur=20:20,drawtext=text='{clean_title}':fontsize=80:fontcolor={self.title_color}:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black:shadowx=4:shadowy=4{font_opt}",
-            "-t", "2", "-c:v", "libx264", "-c:a", "aac", "-ar", "44100", "-shortest",
+            "ffmpeg", "-y", 
+            "-loop", "1", "-i", frame_path,
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",  # Audio silencieux avec bon sample rate
+            "-vf", f"boxblur=20:20,drawtext=text='{clean_title}':fontsize=100:fontcolor={self.title_color}:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black:shadowx=4:shadowy=4{font_opt}",
+            "-t", "2",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2",
+            "-shortest",
             intro_path
         ]
-        subprocess.run(cmd, capture_output=True)
+        subprocess.run(cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         
+        # 3. Concaténer intro + vidéo avec ré-encodage pour sync parfait
         concat_file = os.path.join(TEMP_DIR, "intro_concat.txt")
         with open(concat_file, "w") as f:
             f.write(f"file '{intro_path}'\nfile '{self.cut_video_path}'\n")
         
-        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
-               "-c:v", "libx264", "-c:a", "aac", "-ar", "44100", output_with_intro]
-        subprocess.run(cmd, capture_output=True)
+        cmd = [
+            "ffmpeg", "-y", 
+            "-f", "concat", "-safe", "0", "-i", concat_file,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2",
+            "-async", "1",  # Sync audio
+            "-vsync", "cfr",  # Constant frame rate
+            output_with_intro
+        ]
+        subprocess.run(cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         
         return output_with_intro
     
