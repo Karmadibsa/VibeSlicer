@@ -11,6 +11,7 @@ import pathlib
 # --- FIX CUDA DLLs ---
 # Attempt to find installed NVIDIA libraries (cublas, cudnn) and add to PATH/DLL_Directory
 # This fixes "Library not found" errors with faster-whisper/ctranslate2 on Windows
+print("Vérification des bibliothèques NVIDIA (cuBLAS, cuDNN)...")
 try:
     site_packages = pathlib.Path(sys.prefix) / "Lib" / "site-packages"
     nvidia_path = site_packages / "nvidia"
@@ -22,10 +23,14 @@ try:
                 if bin_dir.exists():
                     os.add_dll_directory(str(bin_dir))
                     os.environ["PATH"] = str(bin_dir) + ";" + os.environ["PATH"]
+                    print(f"  -> Ajouté: {bin_dir}")
                 else:
                     # Fallback: check root of lib dir
                     os.add_dll_directory(str(lib_dir))
                     os.environ["PATH"] = str(lib_dir) + ";" + os.environ["PATH"]
+                    print(f"  -> Ajouté (fallback): {lib_dir}")
+    else:
+        print("  -> Dossier 'nvidia' non trouvé dans site-packages. CUDA risque de ne pas fonctionner.")
 except Exception as e:
     print(f"Warning: Failed to auto-add NVIDIA DLLs: {e}")
 
