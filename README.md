@@ -1,96 +1,48 @@
-# 🎬 VibeSlicer Studio v2.0 - Projet Nettoyé
+# 🎬 VibeSlicer Studio v3.0 (Bulletproof Engine)
 
-## � Structure du Projet
+VibeSlicer est un outil professionnel de découpe vidéo automatique ("Jumpcut") optimisé pour les créateurs de contenu (Twitch VODs, YouTube).
 
-```
-KarmaKut/
-├── 🎯 app.py                          # Application principale (Interface)
-├── ⚙️  karmakut_backend.py            # Logique de traitement vidéo
-│
-├── 📚 README.md                       # Documentation principale
-├── 📚 GUIDE_DEMARRAGE.md              # Guide utilisateur
-├── 📚 DOCUMENTATION_TECHNIQUE.md      # Documentation développeur
-│
-├── � requirements.txt                # Dépendances Python
-├── 🚀 start_vibeslicer_studio.bat    # Lanceur (double-clic pour démarrer)
-├── 📝 .gitignore                      # Configuration Git
-│
-├── 📂 input/                          # Placez vos vidéos ici
-├── 📂 output/                         # Vidéos finales générées
-├── 📂 temp/                           # Fichiers temporaires
-└── 📂 assets/
-    ├── Poppins-*.ttf                  # Polices pour sous-titres
-    └── music/                         # (Optionnel) Musiques de fond
-```
+## 🚀 Nouveautés v3.0 (Architecture "Bulletproof")
 
-## 🚀 Démarrage Rapide
+Cette version est une réécriture complète du moteur vidéo pour résoudre définitivement les problèmes de synchronisation audio/vidéo (Drift) liés aux enregistrements OBS en frame rate variable (VFR).
 
-### **Méthode 1 : Double-clic (Recommandé)**
-```
-Double-cliquez sur : start_vibeslicer_studio.bat
-```
+### Fonctionnalités Clés :
+*   **🛡️ Sanitization-First Architecture** : Toute vidéo entrante est immédiatement convertie en **CFR 30fps / Audio 44.1kHz** avant analyse. Cela garantit une précision au millième de seconde pour la découpe, peu importe la source (OBS, iPhone, etc.).
+*   **⚡ Native FFmpeg Silence Detection** : Abandon de pydub (lent) au profit du filtre `silencedetect` de FFmpeg (10x plus rapide).
+*   **📝 Sous-titres .ASS Robustes** : Utilisation du format Advanced Substation Alpha (.ass) pour un positionnement et un style parfaits. Finis les problèmes de police introuvable ou de chemins Windows cassés.
+*   **🔊 Audio Broadcast Standard** : Normalisation automatique via `loudnorm` (I=-16 LUFS) pour un son professionnel.
 
-### **Méthode 2 : Terminal**
-```bash
-python app.py
-```
+## 🛠️ Installation
 
-## 📝 Installation (Première fois)
+1.  **Pré-requis** :
+    *   Python 3.10+
+    *   FFmpeg (ajouté au PATH système)
+    *   CUDA (Optionnel, pour accélération GPU Whisper)
 
-```bash
-# Installer les dépendances
-pip install -r requirements.txt
-```
+2.  **Installation des dépendances** :
+    ```bash
+    pip install customtkinter opencv-python pillow faster-whisper pydub
+    ```
+    *(Note : pydub est gardé pour compatibilité legacy mais n'est plus utilisé par le moteur principal)*
 
-## 💡 Utilisation
+3.  **Lancement** :
+    ```bash
+    python app.py
+    ```
 
-1. **Ajouter vos vidéos** dans le dossier `input/`
-2. **Lancer** l'application (double-clic sur `.bat`)
-3. **Sélectionner** une vidéo dans la bibliothèque
-4. **Configurer** (sensibilité, musique optionnelle)
-5. **Analyser & Transcrire** (2-5 min)
-6. **Éditer** les sous-titres si besoin
-7. **Rendre** la vidéo finale → dans `output/`
+## 📂 Structure du Projet
 
-## 🎨 Fonctionnalités
+*   `app.py` : Interface Graphique (CustomTkinter) v3.0.
+*   `vibe_engine.py` : Le cerveau. Contient toute la logique FFmpeg remasterisée.
+*   `input/` : Déposez vos vidéos brutes ici.
+*   `output/` : Récupérez vos montages ici.
+*   `temp/` : Fichiers intermédiaires (vidéos nettoyées, segments). Peut être vidé sans risque.
+*   `assets/` : Contient les polices (Poppins-Bold.ttf) et la musique.
 
-- ✂️ Suppression automatique des silences
-- 🎤 Transcription automatique (Whisper AI)
-- 📝 Sous-titres stylisés avec mots-clés en JAUNE
-- 🎵 Musique de fond (10% volume) optionnelle
-- � Normalisation audio professionnelle
-- ✏️ Éditeur de sous-titres intégré
+## ⚠️ Notes Importantes pour les Développeurs
 
-## ⚠️ Prérequis
-
-- **Python 3.9+** (avec pip)
-- **FFmpeg** (dans le PATH système)
-- **(Optionnel) GPU NVIDIA** pour accélération
-
-## 📊 Performance
-
-| Configuration | Temps pour 1 min vidéo |
-|---------------|------------------------|
-| GPU NVIDIA    | ~2-3 minutes          |
-| CPU           | ~5-10 minutes         |
-
-## � Dépannage
-
-### "FFmpeg non détecté"
-→ Installer FFmpeg et l'ajouter au PATH Windows
-
-### "Transcription lente"
-→ Normal sur CPU. GPU NVIDIA accélère x3-5
-
-### "Aucune vidéo trouvée"
-→ Vérifier que les vidéos sont bien dans `input/`
-
-## � Documentation
-
-- **README.md** - Ce fichier
-- **GUIDE_DEMARRAGE.md** - Guide détaillé pas à pas
-- **DOCUMENTATION_TECHNIQUE.md** - Pour développeurs
+*   N'éditez PAS `backend_v2.py` ou `app_v2.py` (Archives). Tout se passe dans `vibe_engine.py`.
+*   Le moteur utilise des chemins relatifs via `os.chdir(temp)` pour contourner les limitations de longueur de chemin et de caractères spéciaux sous Windows dans les filtres complexes FFmpeg.
 
 ---
-
-**Bon montage ! 🎬**
+*Conçu pour la performance et la stabilité. Fini le désynchro.*

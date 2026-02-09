@@ -13,7 +13,6 @@ import time
 import re
 import tkinter as tk
 import customtkinter as ctk
-from vibe_engine import VibeEngine
 from PIL import Image, ImageTk
 from pathlib import Path
 
@@ -227,7 +226,7 @@ class VibeslicerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         
-        self.title("VibeSlicer Studio v3.0 (Bulletproof Engine)")
+        self.title("VibeSlicer Studio v7.0")
         self.geometry("1500x900")
         self.minsize(1300, 800)
         self.configure(fg_color=BG)
@@ -400,10 +399,11 @@ class VibeslicerApp(ctk.CTk):
     def _sanitize_thread(self):
         try:
             if not self.processor:
-                self.processor = VibeEngine()
+                from karmakut_backend import VibeProcessor, VideoConfig
+                self.processor = VibeProcessor()
             
             # SANITIZE STEP
-            self.clean_video_path = self.processor.sanitize(self.video_path)
+            self.clean_video_path = self.processor.sanitize_video(self.video_path)
             self.log(f"✨ Vidéo prête : {os.path.basename(self.clean_video_path)}")
             
             # Update Info with Clean Video
@@ -650,24 +650,24 @@ class VibeslicerApp(ctk.CTk):
     def _analyze_thread(self, callback=None):
         try:
             if not self.processor:
-                self.processor = VibeEngine()
-            
-            thresh_db = int(self.thresh_slider.get())
+                from karmakut_backend import VibeProcessor, VideoConfig
+                cfg = VideoConfig()
+                cfg.silence_thresh = int(self.thresh_slider.get())
+                self.processor = VibeProcessor(cfg)
+            else:
+                self.processor.cfg.silence_thresh = int(self.thresh_slider.get())
             
             if not self.clean_video_path:
-                self.log("⚠️ Attente fin nettoyage...")
-                time.sleep(1)
-                if not self.clean_video_path:
-                    return
+                self.log("⚠️ Vidéo non nettoyée, attente...")
+                return
 
-            # Analyze directly on video (native ffmpeg)
-            self.log(f"🔍 Analyse silencieuse ({thresh_db}dB)...")
-            speech_ranges = self.processor.detect_silence(self.clean_video_path, db_thresh=thresh_db)
+            audio_path = self.processor.extract_audio(self.clean_video_path)
+            raw_segments = self.processor.analyze_silence(audio_path)
             
             self.segments = []
             last_end = 0
             
-            for start, end in speech_ranges:
+            for start, end in raw_segments:
                 if start > last_end:
                     self.segments.append((last_end, start, 'silence', False))
                 self.segments.append((start, end, 'speech', True))
@@ -676,7 +676,7 @@ class VibeslicerApp(ctk.CTk):
             if last_end < self.video_duration:
                 self.segments.append((last_end, self.video_duration, 'silence', False))
             
-            self.log(f"✅ {len(self.segments)} segments détectés")
+            self.log(f"✅ {len(self.segments)} segments")
             
             if not self.player and CV2_AVAILABLE:
                 self.player = VideoPlayer(self.player_canvas, self._on_player_frame)
@@ -689,7 +689,7 @@ class VibeslicerApp(ctk.CTk):
                 self.after(0, callback)
             
         except Exception as e:
-            self.log(f"❌ Erreur analy: {e}")
+            self.log(f"❌ {e}")
             import traceback
             traceback.print_exc()
         finally:
@@ -787,33 +787,55 @@ class VibeslicerApp(ctk.CTk):
     
     def _cut_and_transcribe_thread(self, segments):
         try:
-            self.log("✂️ Découpe rapide...")
-            self.cut_video_path = os.path.join(TEMP_DIR, "cut_video.mp4")
+            # CUT
+            concat_path = os.path.join(TEMP_DIR, "concat.txt")
+            cuts = []
             
-            # FAST CUT
-            self.processor.fast_cut_concat(self.clean_video_path, segments, self.cut_video_path)
-            self.log("✅ Découpe terminée")
+            for i, (start, end) in enumerate(segments):
+                cut_file = os.path.join(TEMP_DIR, f"cut_{i}.mp4")
+                # Use CLEAN video for cutting
+                # No need for complex filters as input is already sanitized
+                cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", self.clean_video_path,
+                       "-t", str(end - start), "-c:v", "libx264", "-preset", "ultrafast",
+                       "-c:a", "aac", cut_file]
+                subprocess.run(cmd, capture_output=True)
+                cuts.append(cut_file)
+            
+            with open(concat_path, "w") as f:
+                for c in cuts:
+                    f.write(f"file '{c}'\n")
+            
+            self.cut_video_path = os.path.join(TEMP_DIR, "cut_video.mp4")
+            # FIX SYNC: Add -vsync 1 -async 1 to ensure constant frame rate and audio sync
+            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_path,
+                   "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-ar", "44100", 
+                   "-vsync", "1", "-async", "1", self.cut_video_path]
+            subprocess.run(cmd, capture_output=True)
             
             # TRANSCRIBE
-            self.log("🧠 Transcription Whisper...")
-            # Transcribe returns Whisper segments with .words
-            self.subtitles = self.processor.transcribe(self.cut_video_path, model_size="base")
-            self.log(f"✅ Transcrit : {len(self.subtitles)} lignes")
+            self.log("🎤 Transcription...")
             
-            # GENERATE ASS INITIAL
-            ass_path = os.path.join(TEMP_DIR, "subs.ass")
-            self.processor.generate_ass(self.subtitles, ass_path)
+            if not self.processor:
+                from karmakut_backend import VibeProcessor, VideoConfig
+                self.processor = VibeProcessor(VideoConfig())
             
-            # Load Step 3
-            if CV2_AVAILABLE:
-                self.sub_player = VideoPlayer(self.sub_canvas, self._on_sub_player_frame)
-                self.sub_player.load(self.cut_video_path)
+            segs = self.processor.transcribe(self.cut_video_path)
             
+            srt_path = os.path.join(TEMP_DIR, "subtitles.srt")
+            self.processor.generate_srt_with_highlights(segs, srt_path, max_words=2, uppercase=True)
+            
+            with open(srt_path, "r", encoding="utf-8") as f:
+                srt_content = f.read()
+            
+            self.subtitles = self._parse_srt(srt_content)
+            self.log(f"✅ {len(self.subtitles)} sous-titres")
+            
+            # Auto-next step + FORCE UPDATE UI
             self.after(0, lambda: self._show_step(2))
-            self.after(100, self._update_sub_list)
+            self.after(100, lambda: self._update_sub_list()) 
             
         except Exception as e:
-            self.log(f"❌ Erreur: {e}")
+            self.log(f"❌ {e}")
             import traceback
             traceback.print_exc()
         finally:
@@ -916,28 +938,24 @@ class VibeslicerApp(ctk.CTk):
         for w in self.sub_list.winfo_children():
             w.destroy()
         
-        for i, seg in enumerate(self.subtitles):
-            start = getattr(seg, 'start', seg.get('start', 0))
-            end = getattr(seg, 'end', seg.get('end', 0))
-            text = getattr(seg, 'text', seg.get('text', ''))
+        for i, (start, end, text) in enumerate(self.subtitles):
+            row = ctk.CTkFrame(self.sub_list, fg_color=CARD, corner_radius=4)
+            row.pack(fill="x", pady=2)
+            row.grid_columnconfigure(1, weight=1)
             
-            row = ctk.CTkFrame(self.sub_list, fg_color="#1a1a1a", height=30)
-            row.pack(fill="x", pady=1)
+            time_str = f"{int(start // 60)}:{int(start % 60):02d}"
+            ctk.CTkButton(row, text=time_str, width=40, height=22, fg_color=ACCENT, corner_radius=4,
+                          command=lambda s=start: self._seek_sub(s), font=ctk.CTkFont(size=8)).grid(row=0, column=0, padx=4, pady=4)
             
-            ctk.CTkLabel(row, text=f"{start:.1f}s", font=ctk.CTkFont(size=10, weight="bold"), width=40).pack(side="left", padx=5)
-            
-            # Text Entry (readonly for now as sync back to object is hard)
-            # Actually let's just show label for solidity
-            ctk.CTkLabel(row, text=text, font=ctk.CTkFont(size=11), anchor="w").pack(side="left", fill="x", expand=True, padx=5)
-            
-            # We could implement edit later by converting to dicts fully
-            # The following lines are kept as per instruction, but 'entry' is not defined here.
-            # This will cause a NameError if executed.
-            # entry.bind("<Return>", lambda e, idx=i, ent=entry: self._save_sub_text(idx, ent))
+            entry = ctk.CTkEntry(row, font=ctk.CTkFont(size=9), fg_color=BG, height=24, corner_radius=4)
+            entry.insert(0, text)
+            entry.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+            entry.bind("<FocusOut>", lambda e, idx=i, ent=entry: self._save_sub_text(idx, ent))
+            entry.bind("<Return>", lambda e, idx=i, ent=entry: self._save_sub_text(idx, ent))
     
-    def _save_sub_text(self, idx, new_text):
-        # Edition disabled in v3 for stability with raw Whisper objects
-        pass
+    def _save_sub_text(self, idx, entry):
+        if idx < len(self.subtitles):
+            self.subtitles[idx][2] = entry.get()
     
     def _seek_sub(self, time_sec):
         if self.sub_player:
@@ -1013,55 +1031,62 @@ class VibeslicerApp(ctk.CTk):
     def _export_thread(self):
         try:
             if not self.processor:
-                self.processor = VibeEngine()
+                from karmakut_backend import VibeProcessor, VideoConfig
+                self.processor = VibeProcessor(VideoConfig())
             
             name = Path(self.video_path).stem
-            output = os.path.join(OUTPUT_DIR, f"{name}_VibeSlicer_v3.mp4")
+            output = os.path.join(OUTPUT_DIR, f"{name}_FINAL.mp4")
             
-            # Generate ASS (and SRT just in case)
-            ass_path = os.path.join(TEMP_DIR, "subs.ass")
-            # Note: Si l'utilisateur a édité le texte, self.subtitles (les objets Whisper) ne sont pas mis à jour
-            # car l'éditeur UI modifie des Entry Tkinter, pas les objets sources.
-            # Il faudrait relire l'UI. Pour simplifier, on assume pas d'édition ou on regénère.
-            # Mais wait, generate_ass a besoin de .words pour le highlight.
-            # Si on édite le texte global, on perd le mapping des mots.
-            # Pour l'instant, on régénère ASS avec les segments originaux.
-            
-            self.processor.generate_ass(self.subtitles, ass_path)
+            # Save SRT
+            srt_path = os.path.join(TEMP_DIR, "edited.srt")
+            self._save_srt(srt_path)
             
             music = None
             if self.music_var.get() != "Aucune":
                 music = os.path.join(MUSIC_DIR, self.music_var.get())
             
-            # Title intro? (Not fully compatible with V3 engine yet, skipping for robustness)
-            # If we want intro, we must use concat protocol on sanitizied intro + cut video
-            # and shift ASS. Too complex for this iteration.
-            
+            # Title intro?
+            title_text = self.title_entry.get().strip()
             input_video = self.cut_video_path
-
-            # RENDER
-            self.processor.render(input_video, ass_path, music, output)
             
-            # Processed history...
+            if title_text:
+                self.log("📌 Création intro (+2s)...")
+                input_video = self._create_title_intro(title_text)
+                # Shift subtitle timestamps by 2 seconds
+                self._shift_subtitles(2.0)
+                # Re-save SRT with new timestamps
+                self._save_srt(srt_path)
+            
+            # Render
+            if self.use_subs.get() and self.subtitles:
+                self.processor.render_final(input_video, srt_path, output, music)
+            else:
+                if music:
+                    cmd = ["ffmpeg", "-y", "-i", input_video, "-i", music,
+                           "-filter_complex", "[1:a]volume=0.1,aloop=loop=-1:size=2e9[bgm];[0:a][bgm]amix=inputs=2:duration=first[aout]",
+                           "-map", "0:v", "-map", "[aout]", "-c:v", "libx264", "-c:a", "aac", output]
+                    subprocess.run(cmd, capture_output=True)
+                else:
+                    import shutil
+                    shutil.copy(input_video, output)
+            
+            # Save to history
+            video_name = Path(self.video_path).name
+            if video_name not in self.processed_videos:
+                self.processed_videos.append(video_name)
+                save_history(self.processed_videos)
+            
             self.log(f"🎉 {output}")
             self.after(0, lambda: self.output_label.configure(text=f"✅ {output}", text_color=SUCCESS))
-            self.after(0, lambda: subprocess.run(f'explorer /select,"{output}"'))
             
         except Exception as e:
             self.log(f"❌ {e}")
-            import traceback
-            traceback.print_exc()
         finally:
             self.after(0, lambda: self.export_btn.configure(state="normal", text="🎬 EXPORTER"))
     
     def _save_srt(self, path):
-        # Compatibility stub - not used for render but maybe for user check
         with open(path, "w", encoding="utf-8") as f:
-            for i, seg in enumerate(self.subtitles, 1):
-                start = getattr(seg, 'start', seg.get('start', 0))
-                end = getattr(seg, 'end', seg.get('end', 0))
-                text = getattr(seg, 'text', seg.get('text', ''))
-                
+            for i, (start, end, text) in enumerate(self.subtitles, 1):
                 start_str = f"{int(start // 3600):02}:{int((start % 3600) // 60):02}:{int(start % 60):02},{int((start % 1) * 1000):03}"
                 end_str = f"{int(end // 3600):02}:{int((end % 3600) // 60):02}:{int(end % 60):02},{int((end % 1) * 1000):03}"
                 f.write(f"{i}\n{start_str} --> {end_str}\n{text}\n\n")
