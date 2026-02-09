@@ -38,8 +38,10 @@ SUCCESS = "#22c55e"
 WARNING = "#f59e0b"
 ERROR = "#ef4444"
 SPEECH_COLOR = "#22c55e"
+SPEECH_COLOR_DIM = "#14532d"  # Vert sombre
 SILENCE_COLOR = "#f59e0b"
-PROCESSED_COLOR = "#3f3f46"  # Gris pour vidéos déjà traitées
+SILENCE_COLOR_DIM = "#78350f" # Orange sombre
+PROCESSED_COLOR = "#3f3f46"
 
 # Paths
 INPUT_DIR = os.path.abspath("input")
@@ -503,17 +505,25 @@ class VibeslicerApp(ctk.CTk):
         self.seg_list = ctk.CTkScrollableFrame(right, fg_color=BG, corner_radius=6)
         self.seg_list.grid(row=2, column=0, padx=10, pady=(0, 6), sticky="nsew")
         
-        # Buttons
-        btn_frame = ctk.CTkFrame(right, fg_color="transparent")
-        btn_frame.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
-        btn_frame.grid_columnconfigure((0, 1), weight=1)
+        # Buttons for selection
+        sel_frame = ctk.CTkFrame(right, fg_color="transparent")
+        sel_frame.grid(row=3, column=0, padx=10, pady=(0, 6), sticky="ew")
+        sel_frame.grid_columnconfigure((0, 1), weight=1)
         
-        ctk.CTkButton(btn_frame, text="✅ Tout", command=self._keep_all, fg_color=SUCCESS, height=26, corner_radius=6).grid(row=0, column=0, padx=2, sticky="ew")
-        ctk.CTkButton(btn_frame, text="❌ Rien", command=self._remove_all, fg_color=ERROR, height=26, corner_radius=6).grid(row=0, column=1, padx=2, sticky="ew")
+        ctk.CTkButton(sel_frame, text="✅ Parole", command=lambda: self._set_all('speech', True), 
+                      fg_color=SPEECH_COLOR_DIM, hover_color=SPEECH_COLOR, height=24, font=ctk.CTkFont(size=10)).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
+        ctk.CTkButton(sel_frame, text="❌ Parole", command=lambda: self._set_all('speech', False), 
+                      fg_color=CARD, hover_color="#333", height=24, font=ctk.CTkFont(size=10)).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
         
-        self.cut_btn = ctk.CTkButton(btn_frame, text="✂️ Découper →", command=self._apply_cut_and_transcribe,
-                                      fg_color=ACCENT, font=ctk.CTkFont(weight="bold"), height=32, corner_radius=6)
-        self.cut_btn.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="ew")
+        ctk.CTkButton(sel_frame, text="✅ Silence", command=lambda: self._set_all('silence', True), 
+                      fg_color=SILENCE_COLOR_DIM, hover_color=SILENCE_COLOR, height=24, font=ctk.CTkFont(size=10)).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
+        ctk.CTkButton(sel_frame, text="❌ Silence", command=lambda: self._set_all('silence', False), 
+                      fg_color=CARD, hover_color="#333", height=24, font=ctk.CTkFont(size=10)).grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+        
+        # Cut button
+        self.cut_btn = ctk.CTkButton(right, text="✂️ Découper →", command=self._apply_cut_and_transcribe,
+                                      fg_color=ACCENT, font=ctk.CTkFont(weight="bold"), height=36, corner_radius=6)
+        self.cut_btn.grid(row=4, column=0, padx=10, pady=(4, 10), sticky="ew")
     
     def _toggle_play(self):
         if self.player:
@@ -678,13 +688,13 @@ class VibeslicerApp(ctk.CTk):
             x2 = int((end / self.video_duration) * width)
             
             if not keep:
-                color = "#2a2a2a"
+                color = SPEECH_COLOR_DIM if seg_type == 'speech' else SILENCE_COLOR_DIM
             elif seg_type == 'speech':
                 color = SPEECH_COLOR
             else:
                 color = SILENCE_COLOR
             
-            self.timeline_canvas.create_rectangle(x1, 3, x2, height - 3, fill=color, outline="#404040")
+            self.timeline_canvas.create_rectangle(x1, 3, x2, height - 3, fill=color, outline="#202020")
     
     def _update_seg_list_full(self):
         """Mise à jour complète de la liste"""
@@ -738,8 +748,10 @@ class VibeslicerApp(ctk.CTk):
         self._draw_timeline()
         self._update_seg_list_minimal()
     
-    def _remove_all(self):
-        self.segments = [(s, e, t, False) for s, e, t, _ in self.segments]
+    def _set_all(self, target_type, state):
+        for i, (s, e, t, k) in enumerate(self.segments):
+            if t == target_type:
+                self.segments[i] = (s, e, t, state)
         self._draw_timeline()
         self._update_seg_list_minimal()
     
@@ -773,8 +785,10 @@ class VibeslicerApp(ctk.CTk):
                     f.write(f"file '{c}'\n")
             
             self.cut_video_path = os.path.join(TEMP_DIR, "cut_video.mp4")
+            # FIX SYNC: Add -vsync 1 -async 1 to ensure constant frame rate and audio sync
             cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_path,
-                   "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-ar", "44100", self.cut_video_path]
+                   "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-ar", "44100", 
+                   "-vsync", "1", "-async", "1", self.cut_video_path]
             subprocess.run(cmd, capture_output=True)
             
             # TRANSCRIBE
