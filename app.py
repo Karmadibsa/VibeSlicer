@@ -664,6 +664,8 @@ class VibeslicerApp(ctk.CTk):
             traceback.print_exc()
         finally:
             self._is_analyzing = False
+
+    def _draw_timeline(self):
         self.timeline_canvas.delete("all")
         if not self.segments:
             return
