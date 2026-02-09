@@ -158,10 +158,23 @@ class VibeProcessor:
 
     def render_cut(self, concat_path, output_path):
         """Render the cut video (intermediate)"""
+        # Check for NVIDIA GPU for faster encoding
+        has_gpu = False
+        try:
+            if subprocess.run("nvidia-smi", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                has_gpu = True
+        except:
+            pass
+
+        codec = "h264_nvenc" if has_gpu else "libx264"
+        preset = "p1" if has_gpu else "veryfast" # p1 is fastest nvenc preset
+        
+        print(f"Rendu Intermédiaire (Codec: {codec})...")
+        
         cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", concat_path,
-            "-c:v", "libx264", "-preset", "veryfast",
+            "-c:v", codec, "-preset", preset,
             "-c:a", "aac", "-ac", "2", "-ar", "44100",
             "-af", "aresample=async=1000",
             "-avoid_negative_ts", "make_zero",
@@ -171,11 +184,11 @@ class VibeProcessor:
 
     def transcribe(self, video_path, model_size="base"):
         """Returns whisper segments list directly with robust error handling"""
-    def transcribe(self, video_path, model_size="base"):
-        """Returns whisper segments list directly with robust error handling"""
         print(f"--- INIT WHISPER (Model: {model_size}) ---")
         try:
             # Force try CUDA first
+            # ... (rest of function is fine, just removing the duplicate header above)
+
             print("Tentative de chargement sur GPU (CUDA)...")
             model = WhisperModel(model_size, device="cuda", compute_type="float16")
             print(">> SUCCESS: Mode GPU activé !")
@@ -350,6 +363,18 @@ class VibeProcessor:
             defaults.update(style)
             style_str = ",".join([f"{k}={v}" for k, v in defaults.items()])
 
+        # Check for NVIDIA GPU
+        has_gpu = False
+        try:
+            if subprocess.run("nvidia-smi", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                has_gpu = True
+        except:
+            pass
+
+        codec = "h264_nvenc" if has_gpu else "libx264"
+        preset = "p1" if has_gpu else "veryfast"
+        print(f"Burn Subtitles (Codec: {codec})...")
+
         # Escape paths for ffmpeg filter
         srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
         
@@ -357,6 +382,7 @@ class VibeProcessor:
             "ffmpeg", "-y", 
             "-i", video_path,
             "-vf", f"subtitles='{srt_escaped}':force_style='{style_str}'",
+            "-c:v", codec, "-preset", preset,
             "-c:a", "copy",
             output_path
         ]

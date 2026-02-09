@@ -1,67 +1,67 @@
 # VibeSlicer Studio
 
-VibeSlicer Studio is an advanced AI-powered video editor designed to streamline your content creation workflow. It uses Voice Activity Detection (silence removal) and automatic speech transcription to help you edit videos 10x faster.
+VibeSlicer Studio est un éditeur vidéo avancé alimenté par l'IA, conçu pour accélérer votre flux de création de contenu. Il utilise la détection d'activité vocale (suppression des silences) et la transcription automatique pour vous aider à éditer vos vidéos 10 fois plus vite.
 
-## Features
+## Fonctionnalités
 
--   **Automatic Silence Removal**: Detects and removes dead air from your recordings.
--   **AI Transcription**: Automatically transcribes your video using OpenAI's Whisper (running locally).
--   **Subtitle Generation**: Creates accurate subtitles that you can burn directly into the video.
--   **Text-Based Editing**: Edit your video by double-clicking on the transcribed text segments.
--   **Range Selection (Shift+Click)**: Easily select and deactivate multiple segments at once.
--   **Precision Cutting (Alt+Click)**: Split any segment on the timeline with frame-perfect accuracy.
--   **Music Mixing**: Add background music with auto-ducking (volume lowers when you speak).
--   **Intro Title**: Add a quick intro title over a blurred background freeze-frame.
--   **Customizable Subtitles**: Change font size, color, and vertical position with a live preview.
+-   **Suppression Automatique des Silences** : Détecte et supprime les blancs de vos enregistrements.
+-   **Transcription IA** : Transcrit automatiquement votre vidéo en utilisant Whisper (s'exécute localement).
+-   **Génération de Sous-titres** : Crée des sous-titres précis que vous pouvez incruster directement dans la vidéo.
+-   **Édition par le Texte** : Modifiez votre vidéo en double-cliquant sur les segments de texte transcrits.
+-   **Sélection de Plage (Shift+Clic)** : Sélectionnez et désactivez facilement plusieurs segments à la fois.
+-   **Découpe de Précision (Alt+Clic)** : Coupez n'importe quel segment sur la timeline avec une précision à l'image près.
+-   **Mixage Musique** : Ajoutez une musique de fond avec "auto-ducking" (le volume baisse quand vous parlez).
+-   **Titre d'Intro** : Ajoutez un titre d'intro rapide sur un arrêt sur image flouté.
+-   **Sous-titres Personnalisables** : Changez la taille, la couleur et la position verticale des sous-titres avec un aperçu en direct.
 
 ## Installation
 
-1.  **Install Python 3.10 or 3.11**.
-2.  **Install Dependencies**:
+1.  **Installer Python 3.10 ou 3.11**.
+2.  **Installer les Dépendances** :
     ```bash
     pip install -r requirements.txt
     ```
-3.  **Install FFmpeg**: Ensure `ffmpeg` is in your system PATH.
-4.  **Install NVIDIA Libraries (for GPU Acceleration)**:
+3.  **Installer FFmpeg** : Assurez-vous que `ffmpeg` est dans le PATH de votre système.
+4.  **Installer les Bibliothèques NVIDIA (pour l'accélération GPU)** :
     ```bash
     pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
     ```
-    *Note: This is critical for fast transcription. Without it, the app will run on CPU and be very slow.*
+    *Note : Ceci est critique pour une transcription rapide. Sans cela, l'application utilisera le processeur (CPU) et sera très lente.*
 
-## Usage
+## Utilisation
 
-1.  **Launch the Studio**:
-    Run the provided batch file:
+1.  **Lancer le Studio** :
+    Exécutez le fichier batch fourni :
     ```bash
     start_vibeslicer_studio.bat
     ```
-    Or run via python:
+    Ou exécutez via python :
     ```bash
     python vibe_qt.py
     ```
 
-2.  **Workflow**:
-    *   **Import**: Click "+" to add your video file(s).
-    *   **Analyze**: Click "Démarrer le Studio". The AI will process the audio.
-    *   **Edit**:
-        *   **Red segments** are silence (removed). **Green segments** are speech (kept).
-        *   **Toggle**: Click a segment to enable/disable it.
-        *   **Range**: Shift+Click to toggle a range of segments.
-        *   **Edit Text**: Double-click a green segment in the list to correct the subtitle text if needed.
-        *   **Split**: Alt+Click on the timeline (blue bar) to cut a segment in two.
-    *   **Export**:
-        *   Set your **Intro Title** (optional).
-        *   Adjust **Subtitle Size** and **Position** (slider).
-        *   Choose **Background Music**.
-        *   Click **TERMINER ->** to render the final video.
+2.  **Flux de Travail** :
+    *   **Importer** : Cliquez sur "+" pour ajouter votre/vos fichier(s) vidéo.
+    *   **Analyser** : Cliquez sur "Démarrer le Studio". L'IA traitera l'audio (VAD rapide, puis transcription en arrière-plan).
+    *   **Éditer** :
+        *   Les **segments rouges** sont des silences (supprimés). Les **segments verts** sont de la parole (conservés).
+        *   **Basculer** : Cliquez sur un segment pour l'activer/désactiver.
+        *   **Plage** : Shift+Clic pour basculer une plage de segments.
+        *   **Éditer le Texte** : Double-cliquez sur un segment vert dans la liste pour corriger le texte du sous-titre si besoin.
+        *   **Couper** : Alt+Clic sur la timeline (barre bleue) pour couper un segment en deux.
+    *   **Exporter** :
+        *   Définissez votre **Titre d'Intro** (optionnel).
+        *   Ajustez la **Taille** et la **Position** des sous-titres (slider).
+        *   Choisissez une **Musique de Fond**.
+        *   Cliquez sur **TERMINER ->** pour générer la vidéo finale.
 
-## Troubleshooting
+## Dépannage
 
--   **"CUDA Error" / Slow Analysis**:
-    Ensure you have an NVIDIA GPU and have installed the required libraries (`nvidia-cublas-cu12`, `nvidia-cudnn-cu12`). The app attempts to auto-fix missing paths on launch.
--   **Interface Closes Unexpectedly**:
-    Check the terminal output for error messages. Usually indicates a memory issue or missing library.
+-   **"Erreur CUDA" / Analyse Lente** :
+    Assurez-vous d'avoir une carte graphique NVIDIA et d'avoir installé les bibliothèques requises (`nvidia-cublas-cu12`, `nvidia-cudnn-cu12`). L'application tente de corriger automatiquement les chemins manquants au lancement.
+-   **L'Interface se Ferme Inopinément** :
+    Vérifiez la sortie du terminal pour les messages d'erreur. Indique généralement un problème de mémoire ou une bibliothèque manquante.
 
-## Credits
+## Crédits
 
-Developed by **Antigravity**. Powered by `faster-whisper`, `PyQt6`, and `ffmpeg`.
+Développé par **Antigravity**. Propulsé par `faster-whisper`, `PyQt6` et `ffmpeg`.
