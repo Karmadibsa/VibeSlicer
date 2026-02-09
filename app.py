@@ -492,7 +492,7 @@ class VibeslicerApp(ctk.CTk):
         self.thresh_val.grid(row=0, column=2, padx=6)
         
         self.thresh_slider = ctk.CTkSlider(settings, from_=-60, to=-10, width=100, height=12,
-                                            command=lambda v: self.thresh_val.configure(text=str(int(v))), button_color=ACCENT)
+                                            command=self._on_thresh_change, button_color=ACCENT)
         self.thresh_slider.set(-40)
         self.thresh_slider.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
         
@@ -604,9 +604,20 @@ class VibeslicerApp(ctk.CTk):
         self._draw_timeline()
         self._update_seg_list_minimal()
     
+    def _on_thresh_change(self, value):
+        self.thresh_val.configure(text=str(int(value)))
+        # Debounce: wait 500ms before triggering analysis
+        if hasattr(self, '_analyze_timer') and self._analyze_timer:
+            self.after_cancel(self._analyze_timer)
+        self._analyze_timer = self.after(600, self._analyze)
+        
     def _analyze(self, callback=None):
         """Analyse la vidéo"""
-        self.log("🔍 Analyse...")
+        if self.analyze_btn.cget("state") == "disabled":
+            return
+        
+        self.log("🔍 Analyse auto...")
+        self.analyze_btn.configure(state="disabled", text="⏳...")
         threading.Thread(target=self._analyze_thread, args=(callback,), daemon=True).start()
     
     def _analyze_thread(self, callback=None):
@@ -725,7 +736,7 @@ class VibeslicerApp(ctk.CTk):
             self.log("⚠️ Sélectionnez des segments")
             return
         
-        self.log("✂️ Découpe & Transcription...")
+        self.log("✂️ Découpe & Transcrire...")
         self.cut_btn.configure(state="disabled", text="⏳...")
         threading.Thread(target=self._cut_and_transcribe_thread, args=(selected,), daemon=True).start()
     
@@ -737,9 +748,10 @@ class VibeslicerApp(ctk.CTk):
             
             for i, (start, end) in enumerate(segments):
                 cut_file = os.path.join(TEMP_DIR, f"cut_{i}.mp4")
+                # Force sampling rate 44100 to fix pitch issues
                 cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", self.video_path,
                        "-t", str(end - start), "-c:v", "libx264", "-preset", "ultrafast",
-                       "-c:a", "aac", "-b:a", "192k", cut_file]
+                       "-c:a", "aac", "-b:a", "192k", "-ar", "44100", cut_file]
                 subprocess.run(cmd, capture_output=True)
                 cuts.append(cut_file)
             
@@ -749,7 +761,7 @@ class VibeslicerApp(ctk.CTk):
             
             self.cut_video_path = os.path.join(TEMP_DIR, "cut_video.mp4")
             cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_path,
-                   "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", self.cut_video_path]
+                   "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-ar", "44100", self.cut_video_path]
             subprocess.run(cmd, capture_output=True)
             
             # TRANSCRIBE
@@ -770,8 +782,9 @@ class VibeslicerApp(ctk.CTk):
             self.subtitles = self._parse_srt(srt_content)
             self.log(f"✅ {len(self.subtitles)} sous-titres")
             
-            # Auto-next step
+            # Auto-next step + FORCE UPDATE UI
             self.after(0, lambda: self._show_step(2))
+            self.after(100, lambda: self._update_sub_list()) 
             
         except Exception as e:
             self.log(f"❌ {e}")
@@ -915,9 +928,14 @@ class VibeslicerApp(ctk.CTk):
         opts.grid_columnconfigure(1, weight=1)
         
         # Title
-        ctk.CTkLabel(opts, text="📌 Titre intro (2s blur):", font=ctk.CTkFont(size=10), text_color=TEXT).grid(row=0, column=0, padx=12, pady=8, sticky="w")
-        self.title_entry = ctk.CTkEntry(opts, placeholder_text="Optionnel", fg_color=BG, height=28, corner_radius=6)
-        self.title_entry.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
+        ctk.CTkLabel(opts, text="📌 Titre intro (2s):", font=ctk.CTkFont(size=10), text_color=TEXT).grid(row=0, column=0, padx=12, pady=8, sticky="w")
+        self.title_entry = ctk.CTkEntry(opts, placeholder_text="Titre...", fg_color=BG, height=28, corner_radius=6)
+        self.title_entry.grid(row=0, column=1, padx=4, pady=8, sticky="ew")
+        
+        self.color_btn = ctk.CTkButton(opts, text="🎨", width=30, height=28, fg_color="white", corner_radius=6,
+                                        command=self._pick_color)
+        self.color_btn.grid(row=0, column=2, padx=4, pady=8)
+        self.title_color = "#ffffff"
         
         # Music
         ctk.CTkLabel(opts, text="🎵 Musique:", font=ctk.CTkFont(size=10), text_color=TEXT).grid(row=1, column=0, padx=12, pady=8, sticky="w")
@@ -984,8 +1002,12 @@ class VibeslicerApp(ctk.CTk):
             input_video = self.cut_video_path
             
             if title_text:
-                self.log("📌 Création intro...")
+                self.log("📌 Création intro (+2s)...")
                 input_video = self._create_title_intro(title_text)
+                # Shift subtitle timestamps by 2 seconds
+                self._shift_subtitles(2.0)
+                # Re-save SRT with new timestamps
+                self._save_srt(srt_path)
             
             # Render
             if self.use_subs.get() and self.subtitles:
@@ -1021,6 +1043,20 @@ class VibeslicerApp(ctk.CTk):
                 end_str = f"{int(end // 3600):02}:{int((end % 3600) // 60):02}:{int(end % 60):02},{int((end % 1) * 1000):03}"
                 f.write(f"{i}\n{start_str} --> {end_str}\n{text}\n\n")
     
+    def _pick_color(self):
+        from tkinter import colorchooser
+        color = colorchooser.askcolor(initialcolor=self.title_color)[1]
+        if color:
+            self.title_color = color
+            self.color_btn.configure(fg_color=color)
+            
+    def _shift_subtitles(self, offset):
+        """Décale les sous-titres"""
+        for i in range(len(self.subtitles)):
+            self.subtitles[i][0] += offset
+            self.subtitles[i][1] += offset
+        self.log(f"⏩ Sous-titres décalés de {offset}s")
+
     def _create_title_intro(self, title_text):
         intro_path = os.path.join(TEMP_DIR, "intro.mp4")
         output_with_intro = os.path.join(TEMP_DIR, "with_intro.mp4")
@@ -1033,11 +1069,15 @@ class VibeslicerApp(ctk.CTk):
         # Escape text for drawtext
         clean_title = title_text.replace("'", "").replace(":", "\\:")
         
+        # Use Poppins font if available
+        poppins = os.path.join(ASSETS_DIR, "Poppins-Bold.ttf").replace("\\", "/").replace(":", "\\:")
+        font_opt = f":fontfile='{poppins}'" if os.path.exists(os.path.join(ASSETS_DIR, "Poppins-Bold.ttf")) else ""
+        
         cmd = [
             "ffmpeg", "-y", "-loop", "1", "-i", frame_path,
             "-f", "lavfi", "-i", "anullsrc",  # Silent audio
-            "-vf", f"boxblur=20:20,drawtext=text='{clean_title}':fontsize=60:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black:shadowx=2:shadowy=2",
-            "-t", "2", "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            "-vf", f"boxblur=20:20,drawtext=text='{clean_title}':fontsize=80:fontcolor={self.title_color}:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black:shadowx=4:shadowy=4{font_opt}",
+            "-t", "2", "-c:v", "libx264", "-c:a", "aac", "-ar", "44100", "-shortest",
             intro_path
         ]
         subprocess.run(cmd, capture_output=True)
@@ -1047,7 +1087,7 @@ class VibeslicerApp(ctk.CTk):
             f.write(f"file '{intro_path}'\nfile '{self.cut_video_path}'\n")
         
         cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
-               "-c:v", "libx264", "-c:a", "aac", output_with_intro]
+               "-c:v", "libx264", "-c:a", "aac", "-ar", "44100", output_with_intro]
         subprocess.run(cmd, capture_output=True)
         
         return output_with_intro

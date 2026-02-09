@@ -214,9 +214,9 @@ class VibeProcessor:
         srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
         
         style_str = (
-            "Fontname=Poppins-Bold,Fontsize=14,"
+            "Fontname=Poppins-Bold,Fontsize=12,"
             "PrimaryColour=&HFFFFFF,OutlineColour=&HE22B8A,"
-            "BorderStyle=1,Outline=1,Shadow=1,Alignment=2,MarginV=40"
+            "BorderStyle=1,Outline=1,Shadow=1,Alignment=6,MarginV=80"
         )
         
         temp_video = os.path.join(self.cfg.temp_dir, "temp_subtitled.mp4")
