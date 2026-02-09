@@ -720,9 +720,9 @@ class VibeQtApp(QMainWindow):
         # Font Pos
         b_layout.addWidget(QLabel("Hauteur:"))
         self.slider_pos = QSlider(Qt.Orientation.Horizontal)
-        self.slider_pos.setRange(0, 500) # MarginV from bottom
-        self.slider_pos.setValue(30) # Default
-        self.slider_pos.setToolTip("Hauteur Sous-titres")
+        self.slider_pos.setRange(0, 1080) # MarginV from bottom (0 to full height)
+        self.slider_pos.setValue(640) # Default ~1/3 from bottom (1920/3)
+        self.slider_pos.setToolTip("Hauteur Sous-titres (Marge du bas)")
         b_layout.addWidget(self.slider_pos)
         
         b_layout.addWidget(QLabel("Musique:"))
