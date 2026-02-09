@@ -71,7 +71,7 @@ def save_history(videos):
 
 
 class VideoPlayer:
-    """Lecteur vidéo OpenCV avec son externe via ffplay"""
+    """Lecteur vidéo OpenCV avec sync audio précis"""
     
     def __init__(self, canvas, on_frame_callback=None):
         self.canvas = canvas
@@ -84,7 +84,8 @@ class VideoPlayer:
         self.photo = None
         self.video_path = None
         self._play_job = None
-        self._last_frame_time = 0
+        self._play_start_time = 0  # Temps réel au démarrage de la lecture
+        self._play_start_pos = 0   # Position vidéo au démarrage
         self._sound_process = None
     
     def load(self, video_path):
@@ -144,23 +145,31 @@ class VideoPlayer:
         if not self.cap:
             return
         self.playing = True
-        self._last_frame_time = time.time()
-        self._play_loop()
+        self._play_start_time = time.time()
+        self._play_start_pos = self.current_time
         self._start_sound()
+        self._play_loop()
     
     def _play_loop(self):
         if not self.playing:
             return
         
-        now = time.time()
-        elapsed = now - self._last_frame_time
-        frame_time = 1.0 / self.fps
+        # Calculer le temps cible basé sur le temps réel écoulé
+        elapsed_real = time.time() - self._play_start_time
+        target_time = self._play_start_pos + elapsed_real
         
-        if elapsed >= frame_time:
+        # Seek à la bonne position si on est en retard
+        if target_time < self.duration:
+            target_frame = int(target_time * self.fps)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
             self._show_frame()
-            self._last_frame_time = now
+        else:
+            self.pause()
+            return
         
-        self._play_job = self.canvas.after(8, self._play_loop)
+        # Prochain frame basé sur le FPS
+        delay = max(1, int(1000 / self.fps) - 5)
+        self._play_job = self.canvas.after(delay, self._play_loop)
     
     def _start_sound(self):
         """Lance ffplay pour le son"""
@@ -674,17 +683,18 @@ class VibeslicerApp(ctk.CTk):
             type_color = SPEECH_COLOR if seg_type == 'speech' else SILENCE_COLOR
             bg = CARD if keep else "#1a1a1a"
             
-            row = ctk.CTkFrame(self.seg_list, fg_color=bg, corner_radius=4, height=26)
-            row.pack(fill="x", pady=1)
+            row = ctk.CTkFrame(self.seg_list, fg_color=bg, corner_radius=6, height=32)
+            row.pack(fill="x", pady=2)
             row.pack_propagate(False)
             
             var = ctk.BooleanVar(value=keep)
-            cb = ctk.CTkCheckBox(row, text="", variable=var, width=18, checkbox_height=14, checkbox_width=14,
+            cb = ctk.CTkCheckBox(row, text="", variable=var, width=22, checkbox_height=18, checkbox_width=18,
                                   command=lambda idx=i, v=var: self._toggle_seg_fast(idx, v), fg_color=SUCCESS if keep else CARD)
-            cb.pack(side="left", padx=4)
+            cb.pack(side="left", padx=6)
             
-            ctk.CTkLabel(row, text=f"{icon} {start:.1f}→{end:.1f}s", font=ctk.CTkFont(size=8),
-                         text_color=type_color if keep else TEXT_MUTED).pack(side="left", padx=4)
+            type_name = "Parole" if seg_type == 'speech' else "Silence"
+            ctk.CTkLabel(row, text=f"{icon} {type_name} {start:.1f}→{end:.1f}s ({duration:.1f}s)", font=ctk.CTkFont(size=11),
+                         text_color=type_color if keep else TEXT_MUTED).pack(side="left", padx=6)
             
             self._checkboxes.append((var, i))
     
