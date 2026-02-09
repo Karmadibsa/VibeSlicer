@@ -1,160 +1,83 @@
-"""
-Wrapper FFmpeg robuste pour Windows
-Gère les chemins avec espaces et caractères spéciaux
-"""
+import shutil
 import subprocess
 import os
 from pathlib import Path
-from typing import List, Tuple, Optional
-from dataclasses import dataclass
+import logging
 
-from .logger import logger
-
-
-@dataclass
-class FFmpegResult:
-    """Résultat d'une commande FFmpeg"""
-    success: bool
-    stdout: str
-    stderr: str
-    returncode: int
-
+logger = logging.getLogger(__name__)
 
 class FFmpegRunner:
-    """Exécuteur FFmpeg robuste pour Windows"""
+    """
+    Gestionnaire FFmpeg local.
     
-    def __init__(self, working_dir: Path = None):
-        self.working_dir = working_dir or Path.cwd()
+    1. Vérifie si 'bin/ffmpeg.exe' existe dans le dossier de l'app.
+    2. Sinon, cherche dans le PATH système.
+    3. Exécute les commandes via subprocess.
+    """
     
-    def run(self, cmd: List[str], cwd: Path = None, 
-            capture_output: bool = True) -> FFmpegResult:
-        """
-        Exécute une commande FFmpeg
+    def __init__(self, project_root: str):
+        self.project_root = Path(project_root)
+        self.local_bin = self.project_root / "bin"
         
-        Args:
-            cmd: Liste des arguments de la commande
-            cwd: Répertoire de travail (défaut: self.working_dir)
-            capture_output: Capturer stdout/stderr
+        # Détection auto
+        self.ffmpeg_path = self._find_executable("ffmpeg")
+        self.ffprobe_path = self._find_executable("ffprobe")
+        
+        if not self.ffmpeg_path:
+            logger.warning("⚠️ FFmpeg non trouvé ! Installez ffmpeg.exe dans le dossier 'bin/'")
+
+    def _find_executable(self, name: str) -> str:
+        """Trouve l'exécutable local ou système"""
+        # Local (Windows)
+        local_exe = self.local_bin / f"{name}.exe"
+        if local_exe.exists():
+            return str(local_exe)
             
-        Returns:
-            FFmpegResult avec les résultats
-        """
-        cwd = cwd or self.working_dir
-        
-        logger.debug(f"FFmpeg: {' '.join(cmd)}")
-        
-        try:
-            process = subprocess.run(
-                cmd,
-                cwd=str(cwd),
-                stdout=subprocess.PIPE if capture_output else None,
-                stderr=subprocess.PIPE if capture_output else None,
-                text=True,
-                encoding='utf-8',
-                errors='replace'
-            )
+        # Système
+        system_exe = shutil.which(name)
+        if system_exe:
+            return system_exe
             
-            result = FFmpegResult(
-                success=process.returncode == 0,
-                stdout=process.stdout or "",
-                stderr=process.stderr or "",
-                returncode=process.returncode
-            )
+        return None
+
+    def run(self, args: list, cwd=None) -> subprocess.CompletedProcess:
+        """Exécute une commande FFmpeg"""
+        if not self.ffmpeg_path:
+            raise RuntimeError("FFmpeg non trouvé")
             
-            if not result.success:
-                logger.error(f"FFmpeg failed: {result.stderr[:500]}")
+        cmd = [self.ffmpeg_path] + args
+        
+        # Options pour cacher la console sous Windows
+        creationflags = 0
+        if os.name == 'nt':
+            creationflags = subprocess.CREATE_NO_WINDOW
             
-            return result
+        logger.info(f"Running FFmpeg: {' '.join(cmd)}")
+        
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            creationflags=creationflags,
+            capture_output=True,
+            text=True
+        )
+
+    def run_ffprobe(self, args: list) -> str:
+        """Exécute une commande ffprobe"""
+        if not self.ffprobe_path:
+            raise RuntimeError("ffprobe non trouvé")
             
-        except Exception as e:
-            logger.error(f"FFmpeg execution error: {e}")
-            return FFmpegResult(
-                success=False,
-                stdout="",
-                stderr=str(e),
-                returncode=-1
-            )
-    
-    def get_duration(self, video_path: Path) -> float:
-        """Obtient la durée d'une vidéo en secondes"""
-        cmd = [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(video_path)
-        ]
+        cmd = [self.ffprobe_path] + args
         
-        result = self.run(cmd)
-        if result.success:
-            try:
-                return float(result.stdout.strip())
-            except ValueError:
-                pass
-        return 0.0
-    
-    def extract_audio(self, video_path: Path, audio_path: Path) -> bool:
-        """Extrait l'audio d'une vidéo"""
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video_path),
-            "-vn", "-acodec", "pcm_s16le",
-            "-ar", "16000", "-ac", "1",
-            str(audio_path)
-        ]
-        return self.run(cmd).success
-    
-    def detect_silence(self, video_path: Path, 
-                       threshold_db: int = -40,
-                       min_duration: float = 0.5) -> List[Tuple[float, float]]:
-        """
-        Détecte les silences dans une vidéo
-        
-        Returns:
-            Liste de tuples (start, end) des segments de PAROLE
-        """
-        import re
-        
-        cmd = [
-            "ffmpeg", "-i", str(video_path),
-            "-af", f"silencedetect=noise={threshold_db}dB:d={min_duration}",
-            "-f", "null", "-"
-        ]
-        
-        result = self.run(cmd)
-        if not result.success:
-            return []
-        
-        # Parse silence detection output
-        silence_starts = []
-        silence_ends = []
-        
-        for line in result.stderr.split('\n'):
-            if "silence_start" in line:
-                match = re.search(r"silence_start: ([\d.]+)", line)
-                if match:
-                    silence_starts.append(float(match.group(1)))
-            elif "silence_end" in line:
-                match = re.search(r"silence_end: ([\d.]+)", line)
-                if match:
-                    silence_ends.append(float(match.group(1)))
-        
-        # Get video duration
-        video_duration = self.get_duration(video_path)
-        
-        # Convert silence regions to speech regions
-        speech_segments = []
-        current_pos = 0.0
-        
-        for i in range(len(silence_starts)):
-            sil_start = silence_starts[i]
-            sil_end = silence_ends[i] if i < len(silence_ends) else video_duration
+        # Options pour cacher la console
+        creationflags = 0
+        if os.name == 'nt':
+            creationflags = subprocess.CREATE_NO_WINDOW
             
-            if sil_start > current_pos:
-                speech_segments.append((current_pos, sil_start))
-            
-            current_pos = sil_end
-        
-        if current_pos < video_duration:
-            speech_segments.append((current_pos, video_duration))
-        
-        return speech_segments
+        result = subprocess.run(
+            cmd,
+            creationflags=creationflags,
+            capture_output=True,
+            text=True
+        )
+        return result.stdout
