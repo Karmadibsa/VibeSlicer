@@ -1,0 +1,36 @@
+"""
+Constantes de style pour l'interface utilisateur
+"""
+
+# Couleurs principales
+BG = "#0f0f0f"
+CARD = "#1a1a1a"
+ACCENT = "#E22B8A"
+ACCENT_LIGHT = "#ff4da6"
+SUCCESS = "#22c55e"
+ERROR = "#ef4444"
+WARNING = "#f97316"
+
+# Texte
+TEXT = "#ffffff"
+TEXT_MUTED = "#888888"
+TEXT_DIM = "#555555"
+
+# Timeline
+SPEECH_COLOR = "#22c55e"
+SPEECH_COLOR_DIM = "#0f3320"
+SILENCE_COLOR = "#f97316"
+SILENCE_COLOR_DIM = "#3d1c0a"
+
+# Fonts
+FONT_FAMILY = "Segoe UI"
+FONT_SIZE_SMALL = 10
+FONT_SIZE_NORMAL = 12
+FONT_SIZE_LARGE = 14
+FONT_SIZE_TITLE = 18
+
+# Dimensions
+BUTTON_HEIGHT = 32
+BUTTON_HEIGHT_SMALL = 28
+CORNER_RADIUS = 8
+CORNER_RADIUS_SMALL = 6
