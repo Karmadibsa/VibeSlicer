@@ -699,12 +699,12 @@ class VibeslicerApp(ctk.CTk):
             
             row = ctk.CTkFrame(self.seg_list, fg_color=bg, corner_radius=6, height=32)
             row.pack(fill="x", pady=2)
-            row.pack_propagate(False)
+            # row.pack_propagate(False) # Removed to avoid layout issues
             
             var = ctk.BooleanVar(value=keep)
             cb = ctk.CTkCheckBox(row, text="", variable=var, width=22, checkbox_height=18, checkbox_width=18,
                                   command=lambda idx=i, v=var: self._toggle_seg_fast(idx, v), fg_color=SUCCESS if keep else CARD)
-            cb.pack(side="left", padx=6)
+            cb.pack(side="left", padx=6, pady=6)
             
             type_name = "Parole" if seg_type == 'speech' else "Silence"
             ctk.CTkLabel(row, text=f"{icon} {type_name} {start:.1f}→{end:.1f}s ({duration:.1f}s)", font=ctk.CTkFont(size=11),
@@ -720,8 +720,16 @@ class VibeslicerApp(ctk.CTk):
     
     def _toggle_seg_fast(self, idx, var):
         start, end, seg_type, _ = self.segments[idx]
-        self.segments[idx] = (start, end, seg_type, var.get())
+        new_state = var.get()
+        self.segments[idx] = (start, end, seg_type, new_state)
+        # self.log(f"Toggle {idx}: {new_state}")
         self._draw_timeline()
+        
+        # Mettre à jour la couleur de fond du row pour feedback visuel
+        # On doit retrouver le widget row parent de la checkbox pour changer sa couleur
+        # Astuce : self._checkboxes[idx] contient (var, i) mais pas le widget...
+        # Simplification : On force un redraw complet si nécessaire, ou on laisse tel quel car la checkbox change de couleur
+        self.update_idletasks()
     
     def _keep_all(self):
         self.segments = [(s, e, t, True) for s, e, t, _ in self.segments]
