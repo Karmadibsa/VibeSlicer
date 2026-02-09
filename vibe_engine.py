@@ -335,65 +335,70 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # === UTILS: FAST CUTTING ===
     def fast_cut_concat(self, video_path, segments, output_path):
         """
-        Coupe et concatène la vidéo selon les segments.
-        Utilise une approche précise pour la synchronisation A/V.
+        Coupe la vidéo en utilisant le filtre 'select'.
+        
+        C'est la méthode "Gold Standard" pour la synchro A/V :
+        Au lieu de couper des fichiers et les recoller (risque de décalage),
+        on filtre les frames voulues en une seule passe.
         """
         if not segments:
             return video_path
-        
-        video_abs = self._get_ffmpeg_path(video_path)
-        temp_segments = []
-        
-        # Phase 1: Découper chaque segment avec PRECISION (pas de keyframe seek)
-        for i, (start, end) in enumerate(segments):
-            duration = end - start
-            seg_file = os.path.join(self.temp_dir, f"seg_{i:03d}.ts")
-            temp_segments.append(seg_file)
             
-            # -ss APRES -i = précision à la frame (plus lent mais sync parfait)
-            # -async 1 = resync audio au début de chaque segment
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", video_abs,
-                "-ss", f"{start:.3f}",           # Seek APRES -i (précis)
-                "-t", f"{duration:.3f}",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-async", "1",                    # Sync audio au start
-                "-vsync", "cfr",                  # Constant frame rate
-                "-avoid_negative_ts", "make_zero",
-                seg_file
-            ]
-            self._run_ffmpeg(cmd, cwd=self.temp_dir)
+        video_abs = self._get_ffmpeg_path(video_path)
         
-        # Phase 2: Concaténer les segments
-        concat_list = os.path.join(self.temp_dir, "concat_list.txt")
-        with open(concat_list, "w", encoding="utf-8") as f:
-            for seg_file in temp_segments:
-                f.write(f"file '{os.path.basename(seg_file)}'\n")
+        # Construire les expressions de sélection
+        # select='between(t,s1,e1)+between(t,s2,e2)+...'
         
-        # Concat avec ré-encodage complet pour timeline propre
+        # Attention à la limite de caractères Windows (8191)
+        # Avec ~30-40 chars par segment, on tient environ 200 segments.
+        # Si trop de segments, on fallback sur la méthode chunks.
+        
+        select_parts = []
+        for start, end in segments:
+            select_parts.append(f"between(t,{start:.3f},{end:.3f})")
+            
+        select_expr = "+".join(select_parts)
+        
+        # Filtres Vidéo et Audio
+        # setpts=N/FRAME_RATE/TB : Recalcule les timestamps vidéo pour qu'ils soient continus
+        # asetpts=N/SR/TB : Recalcule les timestamps audio
+        
+        vf = f"select='{select_expr}',setpts=N/FRAME_RATE/TB"
+        af = f"aselect='{select_expr}',asetpts=N/SR/TB"
+        
+        logger.info(f"Advanced Sync Cutting ({len(segments)} segments)...")
+        
         cmd = [
             "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_list,
+            "-i", video_abs,
+            "-vf", vf,
+            "-af", af,
             "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k",
-            "-async", "1",
-            "-movflags", "+faststart",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2",
+            "-vsync", "cfr",
             output_path
         ]
         
-        logger.info(f"Concatenating {len(temp_segments)} segments...")
+        # Si la commande est trop longue pour Windows, on utilise un script filter complex
+        if len(str(cmd)) > 8000:
+            logger.warning("Command too long, falling back to script file...")
+            filter_script = os.path.join(self.temp_dir, "filter_script.txt")
+            with open(filter_script, "w", encoding="utf-8") as f:
+                f.write(f"select='{select_expr}',setpts=N/FRAME_RATE/TB[v];\n")
+                f.write(f"aselect='{select_expr}',asetpts=N/SR/TB[a]")
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_abs,
+                "-filter_complex_script", filter_script,
+                "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                "-vsync", "cfr",
+                output_path
+            ]
+            
         self._run_ffmpeg(cmd, cwd=self.temp_dir)
-        
-        # Cleanup segments temporaires
-        for seg_file in temp_segments:
-            try:
-                os.remove(seg_file)
-            except:
-                pass
-        
         return output_path
 
     # === STEP 5: FINAL RENDER ===
