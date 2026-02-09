@@ -909,9 +909,14 @@ class VibeslicerApp(ctk.CTk):
             self.sub_seek_slider.set((current_time / self.sub_player.duration) * 100)
         
         for seg in self.subtitles:
-            start = getattr(seg, 'start', seg.get('start', 0))
-            end = getattr(seg, 'end', seg.get('end', 0))
-            text = getattr(seg, 'text', seg.get('text', ''))
+            if isinstance(seg, dict):
+                start = seg.get('start', 0)
+                end = seg.get('end', 0)
+                text = seg.get('text', '')
+            else:
+                start = getattr(seg, 'start', 0)
+                end = getattr(seg, 'end', 0)
+                text = getattr(seg, 'text', '')
             
             if start <= current_time <= end:
                 self.current_sub_label.configure(text=text)
@@ -924,9 +929,14 @@ class VibeslicerApp(ctk.CTk):
             w.destroy()
         
         for i, seg in enumerate(self.subtitles):
-            start = getattr(seg, 'start', seg.get('start', 0))
-            end = getattr(seg, 'end', seg.get('end', 0))
-            text = getattr(seg, 'text', seg.get('text', ''))
+            if isinstance(seg, dict):
+                start = seg.get('start', 0)
+                end = seg.get('end', 0)
+                text = seg.get('text', '')
+            else:
+                start = getattr(seg, 'start', 0)
+                end = getattr(seg, 'end', 0)
+                text = getattr(seg, 'text', '')
             
             row = ctk.CTkFrame(self.sub_list, fg_color="#1a1a1a", height=30)
             row.pack(fill="x", pady=1)
