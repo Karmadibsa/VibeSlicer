@@ -103,10 +103,10 @@ class VibeEngine:
             raise
 
     # === STEP 1: SANITIZER (CFR 30fps / 44.1kHz / AAC) ===
-    def sanitize(self, input_path):
+    def sanitize_video(self, input_path):
         """
-        Convertit la vidéo source en format pivot stable (CFR 30fps).
-        Retourne le chemin ABSOLU du fichier nettoyé.
+        Nettoie la vidéo source (CFR, MP4, AAC, 30fps).
+        CRITIQUE POUR OBS VFR: Force la synchro A/V et le Frame Rate Constant.
         """
         input_path = os.path.abspath(input_path)
         filename = Path(input_path).stem
@@ -117,20 +117,23 @@ class VibeEngine:
             logger.info(f"Using cached clean video: {output_path}")
             return output_path
 
-        logger.info(f"Sanitizing {input_path}...")
+        logger.info(f"Sanitizing (Fixing VFR/Sync) {input_path}...")
         
-        # On exécute depuis temp_dir pour simplifier les chemins de sortie, 
-        # mais input_path est absolu.
+        # Commande ROBUSTE pour fixer le VFR de OBS
+        # -vsync cfr : Force Constant Frame Rate
+        # -af aresample=async=1 : Corrige les timestamps audio
         cmd = [
             "ffmpeg", "-y", 
             "-i", input_path,
             "-r", "30",              # Force 30 fps
+            "-vsync", "cfr",         # Force Constant Frame Rate (Anti-VFR)
             "-c:v", "libx264",       # H.264
             "-preset", "ultrafast",  # Rapide
             "-crf", "23",            # Qualité standard
             "-c:a", "aac",           # AAC
             "-ar", "44100",          # 44.1kHz
             "-ac", "2",              # Stéréo
+            "-af", "aresample=async=1:first_pts=0", # Resync audio Hardcore
             output_name              # Sortie relative (dans temp_dir)
         ]
         
