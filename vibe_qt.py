@@ -55,9 +55,9 @@ def hex_to_ass(hex_color):
 
 # --- WORKER THREAD ---
 # --- WORKER THREAD ---
-# --- WORKER THREAD ---
+# --- WORKER THREADS ---
 class AnalysisWorker(QThread):
-    finished = pyqtSignal(list, float)
+    finished = pyqtSignal(list, float, str) # blocks, dur, audio_path
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
     
@@ -70,63 +70,62 @@ class AnalysisWorker(QThread):
         
     def run(self):
         try:
-            self.progress.emit("Extraction Audio...")
-            from pydub import AudioSegment
+            self.progress.emit("Extraction Audio & VAD (Rapide)...")
             audio_path = self.processor.extract_audio(self.path)
+            
+            # Use pydub for duration (fast enough usually, or use ffprobe if critical)
+            # Assuming pydub is okay for < 10min files.
+            from pydub import AudioSegment
             audio = AudioSegment.from_wav(audio_path)
             dur = len(audio) / 1000.0
             
-            self.progress.emit("Transcription IA en cours (Ceci permet l'édition)...")
-            # Use Whisper to get text immediately
-            # This returns list of Segment(start, end, text, ...)
-            whisper_segs = self.processor.transcribe(audio_path)
+            # 1. VAD Analysis (Silence Detection) - FAST
+            self.progress.emit("Détection des silences...")
+            speech_segs = self.processor.analyze_segments(audio_path, start_range=self.start_r, end_range=self.end_r)
             
-            # Convert to our Block format
+            # 2. Build Blocks
             full_blocks = []
             current_t = 0.0
             
-            # Range filtering start
             if self.start_r:
                 full_blocks.append({"start": 0, "end": self.start_r, "type": "silence", "text": "", "active": False})
                 current_t = self.start_r
 
-            for seg in whisper_segs:
-                # If words are available, split by words
-                if seg.words:
-                    words = seg.words
-                    # Group into chunks of ~5 words or specific duration? 
-                    # Let's do max 6 words per block for readability.
-                    MAX_WORDS = 6
-                    
-                    for i in range(0, len(words), MAX_WORDS):
-                        chunk = words[i:i+MAX_WORDS]
-                        c_start = chunk[0].start
-                        c_end = chunk[-1].end
-                        c_text = "".join([w.word for w in chunk]).strip()
-                        
-                        # Gap -> Silence
-                        if c_start > current_t + 0.1:
-                           full_blocks.append({"start": current_t, "end": c_start, "type": "silence", "text": "", "active": False})
-                        
-                        full_blocks.append({"start": c_start, "end": c_end, "type": "speech", "text": c_text, "active": True})
-                        current_t = c_end
-                else:
-                    # Fallback to full segment if no words
-                    s, e, text = seg.start, seg.end, seg.text.strip()
-                    if s > current_t + 0.1:
-                        full_blocks.append({"start": current_t, "end": s, "type": "silence", "text": "", "active": False})
-                    
-                    full_blocks.append({"start": s, "end": e, "type": "speech", "text": text, "active": True})
-                    current_t = e
+            for s, e in speech_segs:
+                if s > current_t + 0.1:
+                    full_blocks.append({"start": current_t, "end": s, "type": "silence", "text": "", "active": False})
+                
+                # Speech block (Text empty for now, will be filled by TranscribeWorker)
+                full_blocks.append({"start": s, "end": e, "type": "speech", "text": "...", "active": True})
+                current_t = e
             
-            # Final Gap
             effective_end = self.end_r if self.end_r else dur
             if current_t < effective_end - 0.1:
                 full_blocks.append({"start": current_t, "end": effective_end, "type": "silence", "text": "", "active": False})
             
-            self.finished.emit(full_blocks, dur)
+            self.finished.emit(full_blocks, dur, audio_path)
+            
         except Exception as e:
             self.error.emit(str(e))
+
+class TranscribeWorker(QThread):
+    finished = pyqtSignal(list) # whisper segments
+    progress = pyqtSignal(str)
+    
+    def __init__(self, processor, audio_path):
+        super().__init__()
+        self.processor = processor
+        self.audio_path = audio_path
+        
+    def run(self):
+        try:
+            self.progress.emit("Transcription (IA) en arrière-plan...")
+            # Run Whisper
+            wsegs = self.processor.transcribe(self.audio_path)
+            self.finished.emit(wsegs)
+        except Exception as e:
+            print(f"Transcription Failed: {e}")
+            self.finished.emit([]) # Return empty on fail so UI doesn't hang
 
 class RenderWorker(QThread):
     progress = pyqtSignal(str)
@@ -145,12 +144,7 @@ class RenderWorker(QThread):
             concat = os.path.join(self.processor.cfg.temp_dir, f"qt_{tmp_id}.ffconcat")
             cut_vid = os.path.join(self.processor.cfg.temp_dir, f"qt_{tmp_id}.mp4")
             
-            # Filter active segments specifically
-            # We already have active segments computed in 'segments' (tuples), 
-            # BUT we need the TEXT for the SRT.
-            # So we better rely on 'active_blocks' passed in project data.
-            
-            active_blocks = self.data["active_blocks_full"] # List of dicts
+            active_blocks = self.data["active_blocks_full"] 
             
             # Create cut list
             cut_tuples = [(b["start"], b["end"]) for b in active_blocks]
@@ -158,8 +152,7 @@ class RenderWorker(QThread):
             self.processor.render_cut(concat, cut_vid)
             self.data["cut_path"] = cut_vid
             
-            # 2. Generate SRT from Blocks (No Re-Transcription)
-            # We must shift timestamps: Block 0 starts at 0. Block 1 starts at len(Block 0).
+            # 2. Generate SRT from Blocks
             srt_path = os.path.join(self.processor.cfg.temp_dir, f"qt_{tmp_id}.srt")
             
             with open(srt_path, "w", encoding="utf-8") as f:
@@ -168,25 +161,25 @@ class RenderWorker(QThread):
                 for b in active_blocks:
                     dur = b["end"] - b["start"]
                     # If it's a speech block AND has text, write it
-                    if b["type"] == "speech" and b["text"]:
-                        # Setup time
+                    # '...' means pending transcription, clean it
+                    txt = b.get("text", "").strip()
+                    if txt == "...": txt = ""
+                    
+                    if b["type"] == "speech" and txt:
                         s_time = curr_srt_time
                         e_time = curr_srt_time + dur
                         
-                        # Write SRT
                         from vibe_core import format_timestamp_srt
-                        text = b["text"]
-                        if self.data.get("upper"): text = text.upper()
+                        if self.data.get("upper"): txt = txt.upper()
                         
                         f.write(f"{idx}\n")
                         f.write(f"{format_timestamp_srt(s_time)} --> {format_timestamp_srt(e_time)}\n")
-                        f.write(f"{text}\n\n")
+                        f.write(f"{txt}\n\n")
                         idx += 1
                         
                     curr_srt_time += dur
             
             self.data["srt_path"] = srt_path
-            
             self.finished.emit()
             
         except Exception as e:
@@ -502,11 +495,53 @@ class VibeQtApp(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setFormat("Démarrage de l'analyse...")
 
-    def on_analysis_done(self, blocks, dur):
-        self.progress_bar.setVisible(False)
+    def on_analysis_done(self, blocks, dur, audio_path):
+        # 1. Update UI with VAD blocks (Fast)
         self.current_project["duration"] = dur
         self.timeline.set_data(dur, blocks)
         self.rebuild_segment_list(blocks)
+        
+        # 2. Start Background Transcription (Slow but async)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setFormat("VAD OK. Transcription en arrière-plan...")
+        
+        # Store worker to keep reference
+        self.transcribe_worker = TranscribeWorker(self.processor, audio_path)
+        self.transcribe_worker.finished.connect(self.on_transcription_done)
+        self.transcribe_worker.progress.connect(lambda s: self.progress_bar.setFormat(s))
+        self.transcribe_worker.start()
+
+    def on_transcription_done(self, whisper_segs):
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setFormat("Prêt")
+        
+        if not whisper_segs:
+            return
+
+        # Map Whisper Text to VAD Blocks
+        # Strategy: For each VAD speech block, join text of overlapping Whisper segments
+        count = 0
+        for b in self.timeline.blocks:
+            if b["type"] == "speech":
+                b_start = b["start"]
+                b_end = b["end"]
+                
+                relevant_texts = []
+                for ws in whisper_segs:
+                    # Check overlap: (StartA <= EndB) and (EndA >= StartB)
+                    if (ws.start < b_end) and (ws.end > b_start):
+                        relevant_texts.append(ws.text.strip())
+                
+                if relevant_texts:
+                    b["text"] = " ".join(relevant_texts)
+                    count += 1
+                else:
+                    b["text"] = "" 
+        
+        # Refresh UI
+        self.rebuild_segment_list(self.timeline.blocks)
+        if count > 0:
+            self.lbl_editor_title.setText(self.lbl_editor_title.text() + " [Texte OK]")
 
     def rebuild_segment_list(self, blocks):
         self.segment_list.clear()
