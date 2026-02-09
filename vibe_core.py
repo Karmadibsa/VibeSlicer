@@ -131,10 +131,17 @@ class VibeProcessor:
 
     def transcribe(self, video_path, model_size="base"):
         """Returns whisper segments list directly with robust error handling"""
+    def transcribe(self, video_path, model_size="base"):
+        """Returns whisper segments list directly with robust error handling"""
+        print(f"--- INIT WHISPER (Model: {model_size}) ---")
         try:
-            device = "cuda" if subprocess.run("nvidia-smi", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 else "cpu"
-            model = WhisperModel(model_size, device=device, compute_type="float16" if device=="cuda" else "int8")
-        except Exception:
+            # Force try CUDA first
+            print("Tentative de chargement sur GPU (CUDA)...")
+            model = WhisperModel(model_size, device="cuda", compute_type="float16")
+            print(">> SUCCESS: Mode GPU activé !")
+        except Exception as e:
+            print(f">> ECHEC GPU: {e}")
+            print(">> Bascule sur CPU (plus lent)...")
             model = WhisperModel(model_size, device="cpu", compute_type="int8")
             
         try:
