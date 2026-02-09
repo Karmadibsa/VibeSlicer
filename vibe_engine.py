@@ -236,16 +236,20 @@ class VibeEngine:
                 raise e
 
     # === STEP 4: ASS GENERATION (STYLED SUBTITLES) ===
-    def generate_ass(self, segments, ass_path, highlight_words=None):
+    def generate_ass(self, segments, ass_path, highlight_words=None, subtitle_offset=0.0):
         """
         Génère un fichier .ass (Advanced Substation Alpha).
         Plus robuste que SRT pour le style et la position.
         Supporte les objets Whisper Segment ET les dictionnaires (pour édition).
+        
+        Args:
+            subtitle_offset: Décalage en secondes pour décaler tous les sous-titres (ex: 2.0 pour intro)
         """
         if highlight_words is None:
             highlight_words = ["MDR", "FOU", "QUOI", "INCROYABLE", "MAIS", "NON", "OUI"]
             
         def fmt_time(s):
+            s = s + subtitle_offset  # Appliquer le décalage
             h = int(s // 3600)
             m = int((s % 3600) // 60)
             sec = int(s % 60)

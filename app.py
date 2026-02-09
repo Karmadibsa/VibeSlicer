@@ -1116,11 +1116,27 @@ class VibeslicerApp(ctk.CTk):
             if self.music_var.get() != "Aucune":
                 music = os.path.join(MUSIC_DIR, self.music_var.get())
             
-            # Title intro? (Not fully compatible with V3 engine yet, skipping for robustness)
-            # If we want intro, we must use concat protocol on sanitizied intro + cut video
-            # and shift ASS. Too complex for this iteration.
-            
+            # Title intro?
+            title_text = self.title_entry.get().strip()
             input_video = self.cut_video_path
+            sub_offset = 0.0
+            
+            if title_text:
+                self.log("📌 Création intro (+2s)...")
+                try:
+                    input_video = self._create_title_intro(title_text)
+                    sub_offset = 2.0  # Décaler les sous-titres de 2 secondes
+                    self.log("✅ Intro créée")
+                except Exception as e:
+                    self.log(f"⚠️ Intro échouée: {e}")
+                    input_video = self.cut_video_path
+                    sub_offset = 0.0
+            
+            # Régénérer ASS avec offset si intro
+            if sub_offset > 0:
+                self.processor.generate_ass(self.subtitles, ass_path, subtitle_offset=sub_offset)
+            else:
+                self.processor.generate_ass(self.subtitles, ass_path)
 
             # RENDER
             self.processor.render(input_video, ass_path, music, output)
