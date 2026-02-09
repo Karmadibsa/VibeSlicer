@@ -7,43 +7,6 @@ import shutil
 import re
 import time
 import pathlib
-import site
-
-# --- FIX CUDA DLLs ---
-# Attempt to find installed NVIDIA libraries (cublas, cudnn) and add to PATH/DLL_Directory
-# This fixes "Library not found" errors with faster-whisper/ctranslate2 on Windows
-print("Vérification des bibliothèques NVIDIA (cuBLAS, cuDNN)...")
-try:
-    # Check all site-packages (system + user)
-    possible_paths = site.getsitepackages() + [site.getusersitepackages()]
-    
-    cuda_found = False
-    for p in possible_paths:
-        nvidia_path = pathlib.Path(p) / "nvidia"
-        if nvidia_path.exists():
-            print(f"  -> Trouvé dans: {nvidia_path}")
-            for lib_dir in nvidia_path.iterdir():
-                if lib_dir.is_dir():
-                    # Check for 'bin' or 'lib' containing DLLs
-                    bin_dir = lib_dir / "bin"
-                    if bin_dir.exists():
-                        os.add_dll_directory(str(bin_dir))
-                        os.environ["PATH"] = str(bin_dir) + ";" + os.environ["PATH"]
-                        print(f"    -> Ajouté DLL: {bin_dir}")
-                        cuda_found = True
-                    else:
-                        # Fallback: check root of lib dir
-                        os.add_dll_directory(str(lib_dir))
-                        os.environ["PATH"] = str(lib_dir) + ";" + os.environ["PATH"]
-                        print(f"    -> Ajouté DLL (root): {lib_dir}")
-                        cuda_found = True
-    
-    if not cuda_found:
-        print("  -> DOSSIER 'nvidia' INTROUVABLE. Assurez-vous d'avoir installé nvidia-cublas-cu12 et nvidia-cudnn-cu12.")
-        print("  -> Commande: pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
-
-except Exception as e:
-    print(f"Warning: Failed to auto-add NVIDIA DLLs: {e}")
 
 # Import core logic first (imports torch/faster_whisper) to avoid DLL conflicts with PyQt6
 from vibe_core import VibeProcessor
