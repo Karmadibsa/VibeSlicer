@@ -6,6 +6,28 @@ import subprocess
 import shutil
 import re
 import time
+import pathlib
+
+# --- FIX CUDA DLLs ---
+# Attempt to find installed NVIDIA libraries (cublas, cudnn) and add to PATH/DLL_Directory
+# This fixes "Library not found" errors with faster-whisper/ctranslate2 on Windows
+try:
+    site_packages = pathlib.Path(sys.prefix) / "Lib" / "site-packages"
+    nvidia_path = site_packages / "nvidia"
+    if nvidia_path.exists():
+        for lib_dir in nvidia_path.iterdir():
+            if lib_dir.is_dir():
+                # Check for 'bin' or 'lib' containing DLLs
+                bin_dir = lib_dir / "bin"
+                if bin_dir.exists():
+                    os.add_dll_directory(str(bin_dir))
+                    os.environ["PATH"] = str(bin_dir) + ";" + os.environ["PATH"]
+                else:
+                    # Fallback: check root of lib dir
+                    os.add_dll_directory(str(lib_dir))
+                    os.environ["PATH"] = str(lib_dir) + ";" + os.environ["PATH"]
+except Exception as e:
+    print(f"Warning: Failed to auto-add NVIDIA DLLs: {e}")
 
 # Import core logic first (imports torch/faster_whisper) to avoid DLL conflicts with PyQt6
 from vibe_core import VibeProcessor
