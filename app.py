@@ -1025,10 +1025,20 @@ class VibeslicerApp(ctk.CTk):
         intro_path = os.path.join(TEMP_DIR, "intro.mp4")
         output_with_intro = os.path.join(TEMP_DIR, "with_intro.mp4")
         
+        # 1. Extract first frame as image
+        frame_path = os.path.join(TEMP_DIR, "first_frame.jpg")
+        subprocess.run(["ffmpeg", "-y", "-i", self.cut_video_path, "-vframes", "1", frame_path], capture_output=True)
+        
+        # 2. Loop image for 2s with blur and text
+        # Escape text for drawtext
+        clean_title = title_text.replace("'", "").replace(":", "\\:")
+        
         cmd = [
-            "ffmpeg", "-y", "-i", self.cut_video_path,
-            "-vf", f"select=eq(n\\,0),setpts=N/FRAME_RATE/TB,boxblur=15:15,drawtext=text='{title_text}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2",
-            "-t", "2", "-c:a", "aac", intro_path
+            "ffmpeg", "-y", "-loop", "1", "-i", frame_path,
+            "-f", "lavfi", "-i", "anullsrc",  # Silent audio
+            "-vf", f"boxblur=20:20,drawtext=text='{clean_title}':fontsize=60:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black:shadowx=2:shadowy=2",
+            "-t", "2", "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            intro_path
         ]
         subprocess.run(cmd, capture_output=True)
         
