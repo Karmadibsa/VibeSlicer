@@ -807,9 +807,10 @@ class VibeslicerApp(ctk.CTk):
             ass_path = os.path.join(TEMP_DIR, "subs.ass")
             self.processor.generate_ass(self.subtitles, ass_path)
             
-            # Load Step 3
+            # Load Step 3 - Video player for subtitle preview
             if CV2_AVAILABLE:
                 self.sub_player = VideoPlayer(self.sub_video_canvas, self._on_sub_frame)
+                # Load the cut video for preview
                 self.sub_player.load(self.cut_video_path)
             
             self.after(0, lambda: self._show_step(2))
@@ -928,28 +929,54 @@ class VibeslicerApp(ctk.CTk):
         for w in self.sub_list.winfo_children():
             w.destroy()
         
+        # Convert Whisper Segment objects to editable dictionaries if not already
+        editable_subs = []
         for i, seg in enumerate(self.subtitles):
             if isinstance(seg, dict):
-                start = seg.get('start', 0)
-                end = seg.get('end', 0)
-                text = seg.get('text', '')
+                editable_subs.append(seg)
             else:
-                start = getattr(seg, 'start', 0)
-                end = getattr(seg, 'end', 0)
-                text = getattr(seg, 'text', '')
+                # Convert Whisper Segment to dict for editing
+                editable_subs.append({
+                    'start': getattr(seg, 'start', 0),
+                    'end': getattr(seg, 'end', 0),
+                    'text': getattr(seg, 'text', ''),
+                    'words': getattr(seg, 'words', None)  # Keep words for ASS generation
+                })
+        self.subtitles = editable_subs
+        
+        self._sub_entries = []  # Store entry widgets for saving
+        
+        for i, seg in enumerate(self.subtitles):
+            start = seg.get('start', 0)
+            end = seg.get('end', 0)
+            text = seg.get('text', '')
             
-            row = ctk.CTkFrame(self.sub_list, fg_color="#1a1a1a", height=30)
-            row.pack(fill="x", pady=1)
+            row = ctk.CTkFrame(self.sub_list, fg_color="#1a1a1a", height=36)
+            row.pack(fill="x", pady=2, padx=2)
+            row.pack_propagate(False)
             
-            ctk.CTkLabel(row, text=f"{start:.1f}s", font=ctk.CTkFont(size=10, weight="bold"), width=40).pack(side="left", padx=5)
+            # Time label with seek functionality
+            time_btn = ctk.CTkButton(row, text=f"{start:.1f}s", font=ctk.CTkFont(size=10, weight="bold"), 
+                                     width=50, height=28, fg_color="#2a2a2a", hover_color=ACCENT,
+                                     command=lambda t=start: self._seek_sub(t))
+            time_btn.pack(side="left", padx=4, pady=4)
             
-            # Text Entry (readonly for now as sync back to object is hard)
-            # Actually let's just show label for solidity
-            ctk.CTkLabel(row, text=text, font=ctk.CTkFont(size=11), anchor="w").pack(side="left", fill="x", expand=True, padx=5)
+            # Editable text entry
+            entry = ctk.CTkEntry(row, font=ctk.CTkFont(size=11), fg_color=BG, height=28, corner_radius=4)
+            entry.insert(0, text)
+            entry.pack(side="left", fill="x", expand=True, padx=4, pady=4)
+            
+            # Bind the entry to save on focus out or return key
+            entry.bind("<FocusOut>", lambda e, idx=i, ent=entry: self._save_sub_text(idx, ent.get()))
+            entry.bind("<Return>", lambda e, idx=i, ent=entry: self._save_sub_text(idx, ent.get()))
+            
+            self._sub_entries.append(entry)
     
     def _save_sub_text(self, idx, new_text):
-        # Edition disabled in v3 for stability with raw Whisper objects
-        pass
+        """Save edited subtitle text"""
+        if idx < len(self.subtitles):
+            self.subtitles[idx]['text'] = new_text.strip()
+            self.log(f"✏️ Sous-titre {idx+1} modifié")
     
     def _seek_sub(self, time_sec):
         if self.sub_player:

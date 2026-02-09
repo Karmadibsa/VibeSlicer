@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import math
+import shutil
 from pathlib import Path
 
 # Configuration du logging
@@ -239,6 +240,7 @@ class VibeEngine:
         """
         Génère un fichier .ass (Advanced Substation Alpha).
         Plus robuste que SRT pour le style et la position.
+        Supporte les objets Whisper Segment ET les dictionnaires (pour édition).
         """
         if highlight_words is None:
             highlight_words = ["MDR", "FOU", "QUOI", "INCROYABLE", "MAIS", "NON", "OUI"]
@@ -249,6 +251,12 @@ class VibeEngine:
             sec = int(s % 60)
             cs = int((s % 1) * 100)
             return f"{h}:{m:02}:{sec:02}.{cs:02}"
+        
+        def get_attr(seg, key, default=None):
+            """Get attribute from dict or object"""
+            if isinstance(seg, dict):
+                return seg.get(key, default)
+            return getattr(seg, key, default)
 
         header = """[Script Info]
 ScriptType: v4.00+
@@ -266,36 +274,59 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f.write(header)
             
             for seg in segments:
-                words = seg.words
-                if not words: continue
-                
-                # Group 2 words max roughly
-                current_chunk = []
-                chunks = []
-                for w in words:
-                    current_chunk.append(w)
-                    if len(current_chunk) >= 2:
-                        chunks.append(current_chunk)
-                        current_chunk = []
-                if current_chunk: chunks.append(current_chunk)
-                
-                for chunk in chunks:
-                    start = fmt_time(chunk[0].start)
-                    end = fmt_time(chunk[-1].end)
+                try:
+                    # Get words - works for both dict and object
+                    words = get_attr(seg, 'words', None)
                     
-                    text_parts = []
-                    for w in chunk:
-                        clean = w.word.strip().upper()
-                        is_hl = any(k in clean for k in highlight_words)
-                        val = w.word.strip()
-                        if is_hl:
-                            # ASS Color code is BGR: Yellow is 00FFFF (Cyan? No Blue-Green-Red) -> 00D7FF (Gold/Yellow)
-                            # &H0000FFFF is Yellow (Blue=00, Green=FF, Red=FF)
-                            val = f"{{\\c&H00FFFF&}}{val}{{\\c&HFFFFFF&}}" # Reset to white
-                        text_parts.append(val)
+                    # Check if we have words for word-level timing
+                    if words is None or len(words) == 0:
+                        # Fallback: use full text as one chunk (for edited subtitles)
+                        start = fmt_time(get_attr(seg, 'start', 0))
+                        end = fmt_time(get_attr(seg, 'end', 0))
+                        text = get_attr(seg, 'text', '').strip()
+                        if text:
+                            # Apply highlights to full text
+                            for kw in highlight_words:
+                                if kw in text.upper():
+                                    # Simple highlight - find and wrap keywords
+                                    import re
+                                    text = re.sub(
+                                        f"({re.escape(kw)})",
+                                        r"{\\c&H00FFFF&}\1{\\c&HFFFFFF&}",
+                                        text,
+                                        flags=re.IGNORECASE
+                                    )
+                            f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
+                        continue
+
+                    # Group 2 words max roughly
+                    current_chunk = []
+                    chunks = []
+                    for w in words:
+                        current_chunk.append(w)
+                        if len(current_chunk) >= 2:
+                            chunks.append(current_chunk)
+                            current_chunk = []
+                    if current_chunk: chunks.append(current_chunk)
                     
-                    text = " ".join(text_parts)
-                    f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
+                    for chunk in chunks:
+                        start = fmt_time(chunk[0].start)
+                        end = fmt_time(chunk[-1].end)
+                        
+                        text_parts = []
+                        for w in chunk:
+                            clean = w.word.strip().upper()
+                            is_hl = any(k in clean for k in highlight_words)
+                            val = w.word.strip()
+                            if is_hl:
+                                val = f"{{\\c&H00FFFF&}}{val}{{\\c&HFFFFFF&}}" # Yellow highlight
+                            text_parts.append(val)
+                        
+                        text = " ".join(text_parts)
+                        f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
+                except Exception as e:
+                    logger.error(f"Error processing segment: {e}")
+                    continue
     # === UTILS: FAST CUTTING ===
     def fast_cut_concat(self, video_path, segments, output_path):
         """
@@ -336,50 +367,39 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # === STEP 5: FINAL RENDER ===
     def render(self, video_path, ass_path, music_path, output_path):
         """
-        Rendu final utilisant les fichiers relatifs dans temp_dir via os.chdir.
-        C'est la méthode "Bulletproof" pour les chemins Windows.
+        Rendu final utilisant les fichiers relatifs dans temp_dir.
+        SOLUTION BULLETPROOF: On copie les fonts dans temp_dir pour éviter
+        tous les problèmes d'échappement de chemins Windows avec FFmpeg.
         """
-        # On va changer le CWD pour temp_dir pour FFmpeg
-        # Il faut donc que video_path et ass_path soient relatifs à temp_dir s'ils y sont
-        
-        #video_name = os.path.basename(video_path)
-        #ass_name = os.path.basename(ass_path)
-        
-        # Output absolu
         output_path = os.path.abspath(output_path)
-        assets_dir = os.path.abspath("assets").replace("\\", "/") # Pour fontsdir
         
-        # Filtres
-        # ass=filename.ass:fontsdir=...
-        # On échappe les backslashes pour filename si nécessaire, mais si on est dans CWD, juste le nom suffit
+        # === BULLETPROOF: Copier les fonts dans temp_dir ===
+        # Cela évite tous les problèmes de chemins avec espaces/caractères spéciaux
+        fonts_in_temp = os.path.join(self.temp_dir, "fonts")
+        os.makedirs(fonts_in_temp, exist_ok=True)
         
-        # Commande
-        cmd = ["ffmpeg", "-y"]
-        
-        # Inputs
-        # Attention: video_path est un chemin absolu vers TEMP.
-        # Si on change de CWD, on peut utiliser des chemins relatifs.
-        
-        # Strategie : On lance FFmpeg DANS temp_dir.
-        # input video est dans temp_dir (le sanitized ou le cut).
-        # ass est dans temp_dir.
+        # Copier toutes les polices depuis assets vers temp/fonts
+        for ext in ["*.ttf", "*.otf", "*.TTF", "*.OTF"]:
+            import glob
+            for font_file in glob.glob(os.path.join(self.assets_dir, ext)):
+                dest = os.path.join(fonts_in_temp, os.path.basename(font_file))
+                if not os.path.exists(dest):
+                    shutil.copy2(font_file, dest)
+                    logger.info(f"Copied font: {os.path.basename(font_file)}")
         
         vid_rel = os.path.basename(video_path)
         ass_rel = os.path.basename(ass_path)
         
+        # Filtre ASS avec chemin RELATIF vers fonts (pas de caractères spéciaux!)
+        # fontsdir=fonts fonctionne car on exécute FFmpeg dans temp_dir
+        vf = f"ass={ass_rel}:fontsdir=fonts"
+        
         inputs = ["-i", vid_rel]
         
-        # Filtre ASS
-        # fontsdir='C:/Path/To/Assets'
-        # ass='subs.ass'
-        
-        # Attention: sous Windows, FFmpeg et les chemins absolus pour fontsdir c'est parfois la galère.
-        # Mais avec des forward slashes ça passe.
-        
-        vf = f"ass='{ass_rel}':fontsdir='{assets_dir}'"
-        
         if music_path:
-            mus_abs = os.path.abspath(music_path).replace("\\", "/")
+            # Pour la musique, on utilise le chemin absolu mais FFmpeg le gère bien
+            # car ce n'est pas dans un filtre
+            mus_abs = os.path.abspath(music_path)
             inputs.extend(["-i", mus_abs])
             filter_complex = (
                 f"[1:a]aloop=loop=-1:size=2e9,volume=0.1[bgm];"
@@ -389,12 +409,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             )
             maps = ["-map", "[vout]", "-map", "[aout]"]
         else:
-             filter_complex = (
+            filter_complex = (
                 f"[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout];"
                 f"[0:v]{vf}[vout]"
             )
-             maps = ["-map", "[vout]", "-map", "[aout]"]
-             
+            maps = ["-map", "[vout]", "-map", "[aout]"]
+        
+        cmd = ["ffmpeg", "-y"]
         cmd.extend(inputs)
         cmd.extend(["-filter_complex", filter_complex])
         cmd.extend(maps)
