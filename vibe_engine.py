@@ -102,8 +102,7 @@ class VibeEngine:
             logger.error(f"Execution failed: {e}")
             raise
 
-    # === STEP 1: SANITIZER (CFR 30fps / 44.1kHz / AAC) ===
-    def sanitize_video(self, input_path):
+    def sanitize(self, input_path):
         """
         Nettoie la vidéo source (CFR, MP4, AAC, 30fps).
         CRITIQUE POUR OBS VFR: Force la synchro A/V et le Frame Rate Constant.
