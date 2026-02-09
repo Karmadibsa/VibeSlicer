@@ -669,6 +669,15 @@ class VibeQtApp(QMainWindow):
             QMessageBox.warning(self, "Attention", "Tout est rouge ! Vous allez générer une vidéo vide.")
             return
 
+        # Confirm action
+        reply = QMessageBox.question(self, "Confirmer l'Export", 
+                                     "L'export va incruster les sous-titres (Textes, Taille, Position) DEFINITIVEMENT dans la vidéo.\n\n"
+                                     "Cela nécessite un ré-encodage (via GPU si dispo) et prendra un peu de temps.\n\n"
+                                     "Continuer ?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.No:
+            return
+
         self.current_project["segments"] = active_segs
         self.current_project["active_blocks_full"] = active_blocks_full
         self.current_project["title"] = self.line_title.text()
