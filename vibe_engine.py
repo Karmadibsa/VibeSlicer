@@ -21,7 +21,45 @@ class VibeEngine:
         for d in [self.temp_dir, self.assets_dir, self.input_dir, self.output_dir]:
             os.makedirs(d, exist_ok=True)
 
+        self._fix_cuda_path()
         self.whisper_model = None
+
+    def _fix_cuda_path(self):
+        """Tente d'ajouter les libs NVIDIA au PATH pour éviter l'erreur cublas64_12.dll"""
+        # 1. Try pip packages (nvidia-*)
+        try:
+            import nvidia.cublas.lib
+            import nvidia.cudnn.lib
+            
+            paths_to_add = [
+                os.path.dirname(nvidia.cublas.lib.__file__),
+                os.path.dirname(nvidia.cudnn.lib.__file__)
+            ]
+            
+            for p in paths_to_add:
+                if os.path.exists(p) and p not in os.environ["PATH"]:
+                    os.environ["PATH"] = p + os.pathsep + os.environ["PATH"]
+                    logger.info(f"🔧 Added CUDA lib (pip) to PATH: {p}")
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to fix pip CUDA path: {e}")
+
+        # 2. Try System Path (C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin)
+        # On cherche les DLLs cublas64_12.dll
+        try:
+            base_cuda = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+            if os.path.exists(base_cuda):
+                for version in os.listdir(base_cuda):
+                    bin_path = os.path.join(base_cuda, version, "bin")
+                    if os.path.isdir(bin_path):
+                        dll_path = os.path.join(bin_path, "cublas64_12.dll")
+                        if os.path.exists(dll_path) and bin_path not in os.environ["PATH"]:
+                            os.environ["PATH"] = bin_path + os.pathsep + os.environ["PATH"]
+                            logger.info(f"🔧 Added System CUDA bin to PATH: {bin_path}")
+                            break # Found one, good enough
+        except Exception as e:
+            logger.warning(f"Failed to check System CUDA path: {e}")
 
     def _get_ffmpeg_path(self, path):
         """Retourne un chemin absolu formaté pour FFmpeg (forward slashes + échappement)"""
@@ -179,8 +217,22 @@ class VibeEngine:
                 from faster_whisper import WhisperModel
                 self.whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
         
-        segments, _ = self.whisper_model.transcribe(video_path, word_timestamps=True, language="fr")
-        return list(segments)
+        # Execution 'Bulletproof' : On tente, et si le GPU plante (DLL manquante), on fallback CPU
+        try:
+            segments, _ = self.whisper_model.transcribe(video_path, word_timestamps=True, language="fr")
+            return list(segments)
+        except Exception as e:
+            msg = str(e).lower()
+            if "cublas" in msg or "dll" in msg or "library" in msg:
+                logger.warning(f"⚠️ Erreur GPU Runtime ({e}). Bascule automatique vers CPU...")
+                from faster_whisper import WhisperModel
+                self.whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+                
+                # Retry CPU
+                segments, _ = self.whisper_model.transcribe(video_path, word_timestamps=True, language="fr")
+                return list(segments)
+            else:
+                raise e
 
     # === STEP 4: ASS GENERATION (STYLED SUBTITLES) ===
     def generate_ass(self, segments, ass_path, highlight_words=None):

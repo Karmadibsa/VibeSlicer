@@ -120,8 +120,11 @@ class VideoPlayer:
             return False
         
         h, w = frame.shape[:2]
-        cw = self.canvas.winfo_width() or 640
-        ch = self.canvas.winfo_height() or 360
+        h, w = frame.shape[:2]
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 2: cw = 640
+        if ch < 2: ch = 360
         
         scale = min(cw / w, ch / h)
         nw, nh = int(w * scale), int(h * scale)
@@ -806,7 +809,7 @@ class VibeslicerApp(ctk.CTk):
             
             # Load Step 3
             if CV2_AVAILABLE:
-                self.sub_player = VideoPlayer(self.sub_canvas, self._on_sub_player_frame)
+                self.sub_player = VideoPlayer(self.sub_video_canvas, self._on_sub_frame)
                 self.sub_player.load(self.cut_video_path)
             
             self.after(0, lambda: self._show_step(2))
@@ -905,7 +908,11 @@ class VibeslicerApp(ctk.CTk):
         if self.sub_player and self.sub_player.duration > 0:
             self.sub_seek_slider.set((current_time / self.sub_player.duration) * 100)
         
-        for start, end, text in self.subtitles:
+        for seg in self.subtitles:
+            start = getattr(seg, 'start', seg.get('start', 0))
+            end = getattr(seg, 'end', seg.get('end', 0))
+            text = getattr(seg, 'text', seg.get('text', ''))
+            
             if start <= current_time <= end:
                 self.current_sub_label.configure(text=text)
                 return
@@ -929,11 +936,6 @@ class VibeslicerApp(ctk.CTk):
             # Text Entry (readonly for now as sync back to object is hard)
             # Actually let's just show label for solidity
             ctk.CTkLabel(row, text=text, font=ctk.CTkFont(size=11), anchor="w").pack(side="left", fill="x", expand=True, padx=5)
-            
-            # We could implement edit later by converting to dicts fully
-            # The following lines are kept as per instruction, but 'entry' is not defined here.
-            # This will cause a NameError if executed.
-            # entry.bind("<Return>", lambda e, idx=i, ent=entry: self._save_sub_text(idx, ent))
     
     def _save_sub_text(self, idx, new_text):
         # Edition disabled in v3 for stability with raw Whisper objects
