@@ -157,26 +157,14 @@ class VibeProcessor:
                 f.write(f"outpoint {format_timestamp_ffmpeg(end)}\n")
 
     def render_cut(self, concat_path, output_path):
-        """Render the cut video (intermediate)"""
-        # Check for NVIDIA GPU for faster encoding
-        has_gpu = False
-        try:
-            if subprocess.run("nvidia-smi", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-                has_gpu = True
-        except:
-            pass
-
-        codec = "h264_nvenc" if has_gpu else "libx264"
-        preset = "p1" if has_gpu else "veryfast" # p1 is fastest nvenc preset
+        """Render the cut video (intermediate) - STREAM COPY (Ultra Fast)"""
+        print(f"Rendu Intermédiaire (Stream Copy)...")
         
-        print(f"Rendu Intermédiaire (Codec: {codec})...")
-        
+        # Use stream copy for speed. Subtitles will optionally force re-encode later.
         cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", concat_path,
-            "-c:v", codec, "-preset", preset,
-            "-c:a", "aac", "-ac", "2", "-ar", "44100",
-            "-af", "aresample=async=1000",
+            "-c", "copy",
             "-avoid_negative_ts", "make_zero",
             output_path
         ]
