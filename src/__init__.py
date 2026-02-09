@@ -1,1 +1,1 @@
-# VibeSlicer Studio - Refactored Package
+# Package src
