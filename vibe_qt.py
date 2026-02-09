@@ -546,12 +546,29 @@ class VibeQtApp(QMainWindow):
 
     def on_cut_done(self, cut_path):
         self.current_project["cut_path"] = cut_path
-        # 2. Transcribe Cut
-        self.progress_bar.setFormat("Transcription de la séquence coupée...")
-        self.transcribe_worker = TranscribeWorker(self.processor, cut_path)
-        self.transcribe_worker.finished.connect(self.on_subtitles_ready)
-        self.transcribe_worker.progress.connect(lambda s: self.progress_bar.setFormat(s))
-        self.transcribe_worker.start()
+        
+        # 2. Extract Audio & Transcribe
+        # We extract audio explicitly to ensure Whisper gets a clean PCM WAV
+        # This prevents crashes with stream-copied MP4s
+        self.progress_bar.setFormat("Préparation Audio (Extraction)...")
+        QApplication.processEvents() # Force UI update
+        
+        try:
+            # Generate a temp audio path to avoid conflicts
+            tmp_id = int(time.time())
+            audio_out = os.path.join(self.processor.cfg.temp_dir, f"cut_audio_{tmp_id}.wav")
+            self.processor.extract_audio(cut_path, output_path=audio_out)
+            
+            self.progress_bar.setFormat("Transcription de la séquence coupée...")
+            self.transcribe_worker = TranscribeWorker(self.processor, audio_out)
+            self.transcribe_worker.finished.connect(self.on_subtitles_ready)
+            self.transcribe_worker.progress.connect(lambda s: self.progress_bar.setFormat(s))
+            self.transcribe_worker.start()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur", f"Echec extraction audio: {str(e)}")
+            self.setEnabled(True)
+            self.progress_bar.setVisible(False)
 
     def on_subtitles_ready(self, whisper_segs):
         self.setEnabled(True)
@@ -811,12 +828,20 @@ class VibeQtApp(QMainWindow):
         # Header
         layout.addWidget(QLabel("3. Vérification & Export Final"))
         
+        # Main Splitter: Left (Player) | Right (List + Settings)
         content = QSplitter(Qt.Orientation.Horizontal)
         
-        # Left: Player (Cut Video)
+        # --- LEFT: PLAYER ---
         p_container = QWidget()
         pv = QVBoxLayout(p_container)
+        pv.setContentsMargins(0,0,0,0)
+        
         self.sub_player = PreviewPlayer()
+        # Make player expand
+        self.sub_player.setSizePolicy(
+            self.sub_player.sizePolicy().horizontalPolicy().Expanding, 
+            self.sub_player.sizePolicy().verticalPolicy().Expanding
+        )
         pv.addWidget(self.sub_player)
         
         ctrl = QHBoxLayout()
@@ -824,50 +849,61 @@ class VibeQtApp(QMainWindow):
         btn.clicked.connect(lambda: self.sub_player.play() if self.sub_player.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState else self.sub_player.pause())
         ctrl.addWidget(btn)
         pv.addLayout(ctrl)
+        
         content.addWidget(p_container)
         
-        # Right: Subtitle List
-        l_container = QWidget()
-        lv = QVBoxLayout(l_container)
-        lv.addWidget(QLabel("Sous-titres (Double-click pour éditer)"))
+        # --- RIGHT: SIDEBAR ---
+        r_container = QWidget()
+        rv = QVBoxLayout(r_container)
+        rv.setContentsMargins(0,0,0,0)
+        
+        # 1. Subtitle List
+        rv.addWidget(QLabel("Sous-titres (Double-click pour éditer):"))
         self.sub_list = QListWidget()
         self.sub_list.itemDoubleClicked.connect(self.on_sub_edit_text)
         self.sub_list.itemClicked.connect(lambda item: self.sub_player.set_position(item.data(Qt.ItemDataRole.UserRole)["start"]))
-        lv.addWidget(self.sub_list)
-        content.addWidget(l_container)
+        rv.addWidget(self.sub_list)
         
-        layout.addWidget(content, stretch=1)
+        # 2. Export Settings
+        grp = QGroupBox("Paramètres & Export")
+        gl = QVBoxLayout(grp)
         
-        # Settings & Export
-        bottom = QGroupBox("Export Final")
-        bl = QHBoxLayout(bottom)
-        
-        # Appearance
-        bl.addWidget(QLabel("Taille:"))
+        # Size & Pos
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Taille:"))
         self.spin_sub_size = QSpinBox()
         self.spin_sub_size.setRange(10, 200)
         self.spin_sub_size.setValue(24)
-        bl.addWidget(self.spin_sub_size)
+        row1.addWidget(self.spin_sub_size)
+        gl.addLayout(row1)
         
-        bl.addWidget(QLabel("Pos Y:"))
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Pos Y:"))
         self.slider_sub_pos = QSlider(Qt.Orientation.Horizontal)
         self.slider_sub_pos.setRange(0, 1080)
         self.slider_sub_pos.setValue(30)
-        bl.addWidget(self.slider_sub_pos)
+        row2.addWidget(self.slider_sub_pos)
+        gl.addLayout(row2)
         
         # Music
-        bl.addWidget(QLabel("Musique:"))
+        gl.addWidget(QLabel("Musique de fond:"))
         from PyQt6.QtWidgets import QComboBox
         self.combo_music_final = QComboBox()
-        self.combo_music_final.setMinimumWidth(150)
-        bl.addWidget(self.combo_music_final)
+        gl.addWidget(self.combo_music_final)
         
+        # Export Button
         btn_exp = QPushButton("EXPORTER VIDEO FINALE ->")
-        btn_exp.setStyleSheet("background-color: #8A2BE2; font-weight: bold; padding: 15px;")
+        btn_exp.setStyleSheet("background-color: #8A2BE2; font-weight: bold; padding: 15px; margin-top: 10px;")
         btn_exp.clicked.connect(self.export_final_video)
-        bl.addWidget(btn_exp)
+        gl.addWidget(btn_exp)
         
-        layout.addWidget(bottom)
+        rv.addWidget(grp)
+        content.addWidget(r_container)
+        
+        # Set Splitter Ratio (70% Player, 30% Sidebar)
+        content.setSizes([900, 380])
+        
+        layout.addWidget(content)
         return w
 
     def load_subtitle_interface(self):
