@@ -5,7 +5,7 @@ import customtkinter as ctk
 # Ajouter le chemin courant au path pour les imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.core.project_state import ProjectState
+from src.core.state import ProjectState
 from src.core.video_processor import VideoProcessor
 from src.ui.main_window import MainWindow
 

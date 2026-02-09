@@ -3,7 +3,7 @@ import threading
 import logging
 import re
 from pathlib import Path
-from src.core.project_state import ProjectState, EventType, Segment
+from src.core.state import ProjectState, EventType, Segment
 from src.utils.ffmpeg_runner import FFmpegRunner
 
 logger = logging.getLogger(__name__)
@@ -20,10 +20,10 @@ class VideoProcessor:
         self.state = state
         self.ffmpeg = FFmpegRunner(os.getcwd())
         
-        # S'abonner au chargement de vidéo
+        # S'abonner aux événements
         self.state.subscribe(EventType.VIDEO_LOADED, self._on_video_loaded)
         self.state.subscribe(EventType.EXPORT_REQUESTED, self._on_export_requested)
-        
+
     def _on_export_requested(self, output_path: Path):
         """Lance l'export en background"""
         t = threading.Thread(target=self.export_final, args=(output_path,))
@@ -122,8 +122,7 @@ class VideoProcessor:
             if start_sil > last_end:
                 segments.append(Segment(last_end, start_sil, "speech", True))
             
-            # On ajoute le SILENCE (marqué comme à supprimer par défaut ?) (non keep=False ?)
-            # Pour l'instant on garde tout comme segments, on filtrera visuellement
+            # On ajoute le SILENCE (marqué comme à supprimer par défaut ?)
             if i < len(silence_ends):
                 end_sil = silence_ends[i]
                 segments.append(Segment(start_sil, end_sil, "silence", False)) # False = à couper

@@ -1,6 +1,6 @@
 import customtkinter as ctk
 import tkinter as tk
-from src.core.project_state import ProjectState, EventType
+from src.core.state import ProjectState, EventType
 from src.ui.components.timeline import Timeline
 from src.ui.components.vlc_player import VLCPlayer, VLC_AVAILABLE
 

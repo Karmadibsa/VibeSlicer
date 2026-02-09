@@ -1,6 +1,6 @@
 import customtkinter as ctk
 import tkinter as tk
-from src.core.project_state import ProjectState, EventType
+from src.core.state import ProjectState, EventType
 
 class Timeline(ctk.CTkFrame):
     """
