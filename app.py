@@ -74,7 +74,7 @@ def save_history(videos):
 
 
 class VideoPlayer:
-    """Lecteur vidéo OpenCV avec sync audio précis"""
+    """Lecteur vidéo OpenCV avec sync audio précis via ffplay"""
     
     def __init__(self, canvas, on_frame_callback=None):
         self.canvas = canvas
@@ -87,8 +87,8 @@ class VideoPlayer:
         self.photo = None
         self.video_path = None
         self._play_job = None
-        self._play_start_time = 0  # Temps réel au démarrage de la lecture
-        self._play_start_pos = 0   # Position vidéo au démarrage
+        self._play_start_time = 0  # Temps réel (wall clock) au démarrage de la lecture
+        self._play_start_pos = 0   # Position vidéo (en sec) au démarrage
         self._sound_process = None
     
     def load(self, video_path):
@@ -120,7 +120,6 @@ class VideoPlayer:
             return False
         
         h, w = frame.shape[:2]
-        h, w = frame.shape[:2]
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
         if cw < 2: cw = 640
@@ -140,7 +139,9 @@ class VideoPlayer:
         y = (ch - nh) // 2
         self.canvas.create_image(x, y, anchor="nw", image=self.photo)
         
-        self.current_time = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+        # Mettre à jour current_time depuis la position réelle du frame
+        frame_pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
+        self.current_time = frame_pos / self.fps if self.fps > 0 else 0
         
         if self.on_frame:
             self.on_frame(self.current_time)
@@ -150,10 +151,16 @@ class VideoPlayer:
     def play(self):
         if not self.cap:
             return
+        
         self.playing = True
+        
+        # Enregistrer la position exacte au moment où on démarre
+        frame_pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
+        self._play_start_pos = frame_pos / self.fps if self.fps > 0 else 0
         self._play_start_time = time.time()
-        self._play_start_pos = self.current_time
-        self._start_sound()
+        
+        # Démarrer le son à cette position exacte
+        self._start_sound(self._play_start_pos)
         self._play_loop()
     
     def _play_loop(self):
@@ -164,53 +171,89 @@ class VideoPlayer:
         elapsed_real = time.time() - self._play_start_time
         target_time = self._play_start_pos + elapsed_real
         
-        # Seek à la bonne position si on est en retard
-        if target_time < self.duration:
-            target_frame = int(target_time * self.fps)
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-            self._show_frame()
-        else:
+        # Vérifier si on a atteint la fin
+        if target_time >= self.duration:
             self.pause()
             return
         
-        # Prochain frame basé sur le FPS
-        delay = max(1, int(1000 / self.fps) - 5)
+        # Seek à la bonne position (pour rester synchronisé avec l'audio)
+        target_frame = int(target_time * self.fps)
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+        self._show_frame()
+        
+        # Prochain frame - délai calculé pour maintenir ~30fps d'affichage
+        delay = max(1, int(1000 / min(self.fps, 30)) - 5)
         self._play_job = self.canvas.after(delay, self._play_loop)
     
-    def _start_sound(self):
-        """Lance ffplay pour le son"""
+    def _start_sound(self, start_position):
+        """Lance ffplay pour le son à une position précise"""
         self.stop_sound()
+        if not self.video_path:
+            return
+        
         try:
+            # Créer les flags pour cacher la fenêtre console sur Windows
+            creationflags = 0
+            if hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                creationflags = subprocess.CREATE_NO_WINDOW
+            
+            # ffplay avec seek précis (-ss avant -i pour seek rapide)
+            cmd = [
+                "ffplay", 
+                "-nodisp",           # Pas d'affichage vidéo
+                "-autoexit",         # Quitter à la fin
+                "-ss", f"{start_position:.3f}",  # Seek précis
+                "-i", self.video_path,
+                "-loglevel", "quiet" # Pas de logs
+            ]
+            
             self._sound_process = subprocess.Popen(
-                ["ffplay", "-nodisp", "-autoexit", "-ss", str(self.current_time), self.video_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                cmd,
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags
             )
-        except:
-            pass
+        except Exception as e:
+            pass  # Silencieux si ffplay non disponible
     
     def stop_sound(self):
+        """Arrête le processus ffplay"""
         if self._sound_process:
             try:
                 self._sound_process.terminate()
+                self._sound_process.wait(timeout=0.2)
             except:
-                pass
+                try:
+                    self._sound_process.kill()
+                except:
+                    pass
             self._sound_process = None
     
     def pause(self):
         self.playing = False
         if self._play_job:
             self.canvas.after_cancel(self._play_job)
+            self._play_job = None
         self.stop_sound()
     
     def seek(self, time_sec):
+        """Seek à une position précise"""
         if not self.cap:
             return
+        
         was_playing = self.playing
         self.pause()
+        
+        # Limiter aux bornes
+        time_sec = max(0, min(time_sec, self.duration))
+        
+        # Seek vidéo
         frame_num = int(time_sec * self.fps)
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         self.current_time = time_sec
         self._show_frame()
+        
+        # Reprendre la lecture si on était en train de jouer
         if was_playing:
             self.play()
     
@@ -224,6 +267,7 @@ class VideoPlayer:
         self.pause()
         if self.cap:
             self.cap.release()
+            self.cap = None
 
 
 class VibeslicerApp(ctk.CTk):
