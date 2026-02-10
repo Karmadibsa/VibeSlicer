@@ -130,8 +130,8 @@ class VideoProcessor:
 
     def export_final(self, output_path: Path):
         """
-        Export final avec ALIGNEMENT TEMPOREL (Snap-to-Frame).
-        C'est ici que la magie de la synchro opère.
+        Export final par INDEX (Frames/Samples) pour une synchro absolue.
+        Remplace la méthode temporelle qui causait du drift.
         """
         logger.info(f"Début export vers {output_path}")
         
@@ -142,41 +142,45 @@ class VideoProcessor:
             logger.warning("Aucun segment à exporter !")
             return
 
-        # --- CORRECTION SYNC : SNAP TO GRID ---
-        # On aligne chaque coupe sur la grille exacte de 60 FPS (0.01666s)
-        # Cela empêche FFmpeg d'hésiter entre deux frames.
-        FPS = 60.0
-        FRAME_DUR = 1.0 / FPS
-        
-        def snap(t):
-            return round(t / FRAME_DUR) * FRAME_DUR
+        # Constantes strictes (garanties par le proxy)
+        FPS = 60
+        SAMPLE_RATE = 44100
+        # 44100 / 60 = 735 samples par frame (Entier parfait)
+        SAMPLES_PER_FRAME = int(SAMPLE_RATE / FPS) 
 
-        select_parts = []
+        select_parts_v = []  # Filtre Vidéo (basé sur n = frame)
+        select_parts_a = []  # Filtre Audio (basé sur n = sample)
+
+        PADDING = 0.15  # 150ms de marge
+
         for s in segments:
-            # --- PADDING : Marge de sécurité anti-coupe-sèche ---
-            # Évite de manger le début des mots ("onjour" -> "Bonjour")
-            PADDING = 0.15  # 150ms de marge
-            start_padded = max(0, s.start - PADDING)
-            end_padded = s.end + PADDING
+            # 1. Calcul du temps avec padding
+            start_t = max(0, s.start - PADDING)
+            end_t = s.end + PADDING
             
-            # On snap sur la grille APRES avoir ajouté le padding
-            start_clean = snap(start_padded)
-            end_clean = snap(end_padded)
+            # 2. Conversion en numéros de Frames (Entiers)
+            start_frame = int(round(start_t * FPS))
+            end_frame = int(round(end_t * FPS))
             
-            # Sécurité anti-glitch (éviter les segments nuls)
-            if end_clean - start_clean < FRAME_DUR:
+            if end_frame <= start_frame:
                 continue
                 
-            # 4 décimales pour être ultra précis
-            select_parts.append(f"between(t,{start_clean:.4f},{end_clean:.4f})")
+            # 3. Conversion en numéros de Samples Audio (Synchronisés sur la frame)
+            # On multiplie l'index de frame par 735 pour avoir l'index audio exact
+            start_sample = start_frame * SAMPLES_PER_FRAME
+            end_sample = end_frame * SAMPLES_PER_FRAME
             
-        select_expr = "+".join(select_parts)
+            # 4. Construction des filtres 'between(n, start, end)'
+            # 'n' est le numéro de l'image ou de l'échantillon
+            select_parts_v.append(f"between(n,{start_frame},{end_frame})")
+            select_parts_a.append(f"between(n,{start_sample},{end_sample})")
+            
+        select_expr_v = "+".join(select_parts_v)
+        select_expr_a = "+".join(select_parts_a)
         
-        # setpts=N/FRAME_RATE/TB reconstruit les timestamps proprement
-        # car les coupes sont alignées sur les frames
-        vf = f"select='{select_expr}',setpts=N/FRAME_RATE/TB"
+        # setpts=N/... Recalcule le temps proprement basé sur le compte continu
+        vf = f"select='{select_expr_v}',setpts=N/FRAME_RATE/TB"
         
-        # --- CHECK AUDIO : éviter le crash sur vidéos muettes ---
         has_audio = self._has_audio_stream(source)
         
         cmd = [
@@ -186,17 +190,18 @@ class VideoProcessor:
         ]
         
         if has_audio:
-            af = f"aselect='{select_expr}',asetpts=N/SR/TB"
-            cmd += ["-af", af, "-c:a", "aac", "-b:a", "192k", "-ar", "44100"]
+            # aselect utilise 'n' comme numéro d'échantillon
+            af = f"aselect='{select_expr_a}',asetpts=N/SR/TB"
+            cmd += ["-af", af, "-c:a", "aac", "-b:a", "192k", "-ar", str(SAMPLE_RATE)]
         else:
-            cmd += ["-an"]  # Pas d'audio
+            cmd += ["-an"]
             logger.info("Vidéo sans audio détectée, export vidéo seule.")
         
         cmd += [
             "-c:v", "libx264", 
             "-preset", "fast",
             "-crf", "22",
-            "-r", "60",
+            "-r", str(FPS),
             str(output_path)
         ]
         
