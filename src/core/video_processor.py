@@ -153,9 +153,15 @@ class VideoProcessor:
 
         select_parts = []
         for s in segments:
-            # On aligne mathématiquement les temps
-            start_clean = snap(s.start)
-            end_clean = snap(s.end)
+            # --- PADDING : Marge de sécurité anti-coupe-sèche ---
+            # Évite de manger le début des mots ("onjour" -> "Bonjour")
+            PADDING = 0.15  # 150ms de marge
+            start_padded = max(0, s.start - PADDING)
+            end_padded = s.end + PADDING
+            
+            # On snap sur la grille APRES avoir ajouté le padding
+            start_clean = snap(start_padded)
+            end_clean = snap(end_padded)
             
             # Sécurité anti-glitch (éviter les segments nuls)
             if end_clean - start_clean < FRAME_DUR:
