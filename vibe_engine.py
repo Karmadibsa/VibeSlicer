@@ -132,16 +132,20 @@ class VibeEngine:
 
     def fast_cut_concat(self, video_path, segments, output_path):
         """
-        Découpe 'Frame Perfect' basée sur le PIVOT.
-        On convertit le Temps en Index d'Image.
+        Découpe 'Frame Perfect' CORRIGÉE.
+        Gère les bornes inclusives de FFmpeg pour éviter le décalage cumulatif.
         """
-        if not segments: return video_path
+        if not segments:
+            # Si pas de segments, on copie juste le fichier (ou on renvoie l'original)
+            shutil.copy2(video_path, output_path)
+            return output_path
         
         video_name = os.path.basename(video_path)
+        
+        # CONSTANTES DU PIVOT
         FPS = 60
-        SAMPLE_RATE = 44100
-        SAMPLES_PER_FRAME = 735 # 44100/60
-        PADDING = 0.15 # Marge de sécurité
+        SAMPLES_PER_FRAME = 735 # 44100 / 60
+        PADDING = 0.15 
         
         select_v = []
         select_a = []
@@ -151,16 +155,26 @@ class VibeEngine:
             s = max(0, start - PADDING)
             e = end + PADDING
             
-            # Conversion en Index (Le secret de la synchro)
+            # Calcul des index théoriques
             start_frame = int(round(s * FPS))
             end_frame = int(round(e * FPS))
             
             if end_frame <= start_frame: continue
             
+            # --- CALCUL DES BORNES AUDIO ---
+            # On veut l'audio qui correspond EXACTEMENT aux frames sélectionnées.
+            # Start: début de la première frame
             start_sample = start_frame * SAMPLES_PER_FRAME
-            end_sample = end_frame * SAMPLES_PER_FRAME
+            # End: fin de la dernière frame (et non début de la frame suivante)
+            # On prend la frame exclusive (end_frame) * taille - 1 sample
+            end_sample = (end_frame * SAMPLES_PER_FRAME) - 1
             
-            select_v.append(f"between(n,{start_frame},{end_frame})")
+            # --- CORRECTION DES BORNES VIDEO ---
+            # FFmpeg 'between' est INCLUSIF. Si on veut 60 frames (0 à 59), on doit demander between(0, 59).
+            # Donc on fait end_frame - 1.
+            select_v.append(f"between(n,{start_frame},{end_frame - 1})")
+            
+            # Idem pour l'audio, end_sample a été calculé pour être le dernier sample inclus
             select_a.append(f"between(n,{start_sample},{end_sample})")
             
         if not select_v: return video_path
@@ -170,7 +184,8 @@ class VibeEngine:
         
         filter_file = os.path.join(self.temp_dir, "cut.txt")
         # On écrit le filtre complexe dans un fichier pour éviter la limite de caractères CMD
-        with open(filter_file, "w") as f: f.write(f"{vf}[v];{af}[a]")
+        with open(filter_file, "w", encoding="utf-8") as f:
+            f.write(f"{vf}[v];{af}[a]")
         
         cmd = [
             "ffmpeg", "-y", "-i", video_name,
