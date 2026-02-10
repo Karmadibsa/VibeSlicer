@@ -175,22 +175,44 @@ class VideoProcessor:
         # setpts=N/FRAME_RATE/TB reconstruit les timestamps proprement
         # car les coupes sont alignées sur les frames
         vf = f"select='{select_expr}',setpts=N/FRAME_RATE/TB"
-        af = f"aselect='{select_expr}',asetpts=N/SR/TB"
+        
+        # --- CHECK AUDIO : éviter le crash sur vidéos muettes ---
+        has_audio = self._has_audio_stream(source)
         
         cmd = [
             "-y",
             "-i", str(source),
             "-vf", vf,
-            "-af", af,
+        ]
+        
+        if has_audio:
+            af = f"aselect='{select_expr}',asetpts=N/SR/TB"
+            cmd += ["-af", af, "-c:a", "aac", "-b:a", "192k", "-ar", "44100"]
+        else:
+            cmd += ["-an"]  # Pas d'audio
+            logger.info("Vidéo sans audio détectée, export vidéo seule.")
+        
+        cmd += [
             "-c:v", "libx264", 
-            "-preset", "fast",   # Meilleure qualité que ultrafast
+            "-preset", "fast",
             "-crf", "22",
-            "-r", "60",          # Force la sortie à 60fps strict
-            "-c:a", "aac", 
-            "-b:a", "192k",
-            "-ar", "44100",      # Force l'audio à 44.1kHz standard
+            "-r", "60",
             str(output_path)
         ]
         
         self.ffmpeg.run(cmd)
         logger.info("Export terminé avec succès.")
+
+    def _has_audio_stream(self, video_path: Path) -> bool:
+        """Vérifie si la vidéo contient une piste audio"""
+        try:
+            result = self.ffmpeg.run_ffprobe([
+                "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                str(video_path)
+            ])
+            return len(result.strip()) > 0
+        except:
+            return True  # En cas de doute, on assume qu'il y a de l'audio
