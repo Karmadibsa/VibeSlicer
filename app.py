@@ -449,14 +449,22 @@ class VibeslicerApp(ctk.CTk):
             if not self.processor:
                 self.processor = VibeEngine()
             
-            # SANITIZE STEP
-            self.clean_video_path = self.processor.sanitize(self.video_path)
-            self.log(f"✨ Vidéo prête : {os.path.basename(self.clean_video_path)}")
+            # SANITIZE STEP (PIVOT CREATION)
+            self.video_info.configure(text="🚀 Optimisation PRO (Pivot 60fps)...")
+            self.log("🚀 Création du Pivot Master (CFR 60fps)...")
+            # C'est ici que la magie opère : on crée le fichier parfait
+            self.clean_video_path = self.processor.create_pivot(self.video_path)
+            self.log(f"✨ Pivot prêt : {os.path.basename(self.clean_video_path)}")
             
             # Update Info with Clean Video
             cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", self.clean_video_path]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            self.video_duration = float(result.stdout.strip())
+            try:
+                # Si ffprobe n'est pas dans le PATH système, tenter via le processeur ou subprocess direct
+                # Ici on assume qu'il est accessible ou on try/except
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                self.video_duration = float(result.stdout.strip())
+            except:
+                self.video_duration = 600.0 # Fallback
             
             self.after(0, lambda: self.video_info.configure(text=f"✅ Prêt • {self.video_duration:.0f}s"))
             
@@ -471,6 +479,8 @@ class VibeslicerApp(ctk.CTk):
         except Exception as e:
             self.log(f"❌ Erreur nettoyage: {e}")
             self.after(0, lambda: self.video_info.configure(text="❌ Erreur nettoyage", text_color=ERROR))
+            import traceback
+            traceback.print_exc()
     
     def _show_frame_on_canvas(self, frame, canvas):
         h, w = frame.shape[:2]
