@@ -13,7 +13,7 @@ class MainWindow(ctk.CTk):
     def __init__(self, state: ProjectState):
         super().__init__()
         
-        self.state = state
+        self.project = state
         self.title("VibeSlicer Studio v8.0 (Legacy Free)")
         self.geometry("1400x900")
         
@@ -40,7 +40,7 @@ class MainWindow(ctk.CTk):
         self.controls_frame.grid_columnconfigure(1, weight=1) # Spacer
         
         # Timeline (Tout en haut des contrôles)
-        self.timeline = Timeline(self.controls_frame, state=self.state, height=80)
+        self.timeline = Timeline(self.controls_frame, state=self.project, height=80)
         self.timeline.grid(row=0, column=0, columnspan=3, sticky="ew", padx=10, pady=10)
         
         # Bouton Import
@@ -60,11 +60,11 @@ class MainWindow(ctk.CTk):
         self.btn_export.grid(row=1, column=3, padx=20, pady=10)
         
         # --- Abonnements aux Événements State ---
-        self.state.subscribe(EventType.VIDEO_LOADED, self._on_video_loaded_state)
+        self.project.subscribe(EventType.VIDEO_LOADED, self._on_video_loaded_state)
         # On peut écouter le chargement du proxy aussi
-        self.state.subscribe(EventType.PROXY_READY, self._on_proxy_ready)
-        self.state.subscribe(EventType.TIME_UPDATED, self._update_time_display)
-        self.state.subscribe(EventType.SEEK_REQUESTED, self._on_seek_requested)
+        self.project.subscribe(EventType.PROXY_READY, self._on_proxy_ready)
+        self.project.subscribe(EventType.TIME_UPDATED, self._update_time_display)
+        self.project.subscribe(EventType.SEEK_REQUESTED, self._on_seek_requested)
 
     # --- Actions UI -> State ---
 
@@ -73,17 +73,17 @@ class MainWindow(ctk.CTk):
         file_path = tk.filedialog.askopenfilename(filetypes=[("Vidéo", "*.mp4 *.mov *.mkv *.avi")])
         if file_path:
             print(f"UI: Fichier sélectionné {file_path}")
-            self.state.load_video(file_path)
+            self.project.load_video(file_path)
             
     def _on_export_click(self):
         """Click Export -> Dialog -> State.request_export"""
-        if not self.state.source_video:
+        if not self.project.source_video:
             return
             
         file_path = tk.filedialog.asksaveasfilename(defaultextension=".mp4", filetypes=[("MP4", "*.mp4")])
         if file_path:
             print(f"UI: Export demandé vers {file_path}")
-            self.state.request_export(file_path)
+            self.project.request_export(file_path)
 
     def _on_play_click(self):
         """Click Play/Pause -> Player Action"""
@@ -96,7 +96,7 @@ class MainWindow(ctk.CTk):
 
     def _on_player_time_update(self, time_sec):
         """Callback venant du Player (Thread VLC) -> State"""
-        self.state.set_time(time_sec)
+        self.project.set_time(time_sec)
 
     # --- Réactions State -> UI ---
     
