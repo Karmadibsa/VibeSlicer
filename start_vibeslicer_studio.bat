@@ -6,7 +6,7 @@ echo  VibeSlicer Studio - Montage Video Auto
 echo ============================================
 echo.
 
-python main.py
+python app.py
 
 if %errorlevel% neq 0 (
     echo.

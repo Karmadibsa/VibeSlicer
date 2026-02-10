@@ -1193,50 +1193,51 @@ class VibeslicerApp(ctk.CTk):
         intro_path = os.path.join(TEMP_DIR, "intro.mp4")
         output_with_intro = os.path.join(TEMP_DIR, "with_intro.mp4")
         
-        # 1. Extract first frame as image
+        # 1. Extraction d'une image pour le fond depuis le PIVOT (clean)
         frame_path = os.path.join(TEMP_DIR, "first_frame.jpg")
-        subprocess.run(["ffmpeg", "-y", "-i", self.cut_video_path, "-vframes", "1", frame_path], 
+        # On utilise clean_video_path (le Pivot) pour avoir une image FULL qualité sans artefacts de compression du cut
+        subprocess.run(["ffmpeg", "-y", "-i", self.clean_video_path, "-vframes", "1", frame_path], 
                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         
-        # 2. Loop image for 2s with blur and text
         clean_title = title_text.replace("'", "").replace(":", "\\:")
-        
-        # Use Poppins font if available
         poppins = os.path.join(ASSETS_DIR, "Poppins-Bold.ttf").replace("\\", "/").replace(":", "\\:")
         font_opt = f":fontfile='{poppins}'" if os.path.exists(os.path.join(ASSETS_DIR, "Poppins-Bold.ttf")) else ""
         
-        # Créer l'intro avec audio silencieux à 44100Hz (même rate que la vidéo coupée)
-        cmd = [
+        # 2. Génération de l'intro avec les paramètres EXACTS du Pivot (60fps, 44100Hz)
+        # C'est crucial pour que la concaténation ne décale pas le son
+        cmd_gen = [
             "ffmpeg", "-y", 
             "-loop", "1", "-i", frame_path,
-            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",  # Audio silencieux avec bon sample rate
-            "-vf", f"boxblur=20:20,drawtext=text='{clean_title}':fontsize=100:fontcolor={self.title_color}:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black:shadowx=4:shadowy=4{font_opt}",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", # Silence audio
+            "-vf", f"boxblur=20:20,drawtext=text='{clean_title}':fontsize=100:fontcolor={self.title_color}:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black:shadowx=4:shadowy=4{font_opt},format=yuv420p",
             "-t", "2",
-            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-r", "60", # Force frame rate
+            "-c:v", "libx264", "-preset", "ultrafast", 
             "-c:a", "aac", "-ar", "44100", "-ac", "2",
-            "-shortest",
             intro_path
         ]
-        subprocess.run(cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.run(cmd_gen, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         
-        # 3. Concaténer intro + vidéo avec ré-encodage pour sync parfait
-        concat_file = os.path.join(TEMP_DIR, "intro_concat.txt")
-        with open(concat_file, "w") as f:
-            f.write(f"file '{intro_path}'\nfile '{self.cut_video_path}'\n")
+        # 3. Concaténation (Méthode TS plus robuste pour la synchro)
+        # On convertit les deux en .ts (transport stream) intermédiaire
+        intro_ts = os.path.join(TEMP_DIR, "intro.ts")
+        cut_ts = os.path.join(TEMP_DIR, "cut.ts")
         
-        cmd = [
+        subprocess.run(["ffmpeg", "-y", "-i", intro_path, "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", intro_ts], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.run(["ffmpeg", "-y", "-i", self.cut_video_path, "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", cut_ts], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        
+        # On concatène les TS
+        concat_cmd = [
             "ffmpeg", "-y", 
-            "-f", "concat", "-safe", "0", "-i", concat_file,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "aac", "-ar", "44100", "-ac", "2",
-            "-async", "1",  # Sync audio
-            "-vsync", "cfr",  # Constant frame rate
+            "-i", f"concat:{intro_ts}|{cut_ts}",
+            "-c", "copy", # Pas de réencodage = Pas de perte de synchro !
+            "-bsf:a", "aac_adtstoasc",
             output_with_intro
         ]
-        subprocess.run(cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.run(concat_cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         
         return output_with_intro
-    
+
     def _reset(self):
         """Reset pour nouvelle vidéo"""
         if self.player:
