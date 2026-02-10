@@ -76,7 +76,7 @@ class VideoPlayer:
             # Rappel dans 10ms (approx 100fps check rate)
             # Utilisation de .after() garantit qu'on reste dans le MainThread
             if not self._stop_flag:
-                self.canvas.after(10, self._check_queue_loop)
+                self.canvas.after(5, self._check_queue_loop)
 
     def load(self, video_path: Path) -> bool:
         """Charge une vidéo et prépare le lecteur"""

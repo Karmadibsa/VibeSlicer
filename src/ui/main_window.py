@@ -2,12 +2,12 @@ import customtkinter as ctk
 import tkinter as tk
 from src.core.state import ProjectState, EventType
 from src.ui.components.timeline import Timeline
-from src.ui.components.vlc_player import VLCPlayer, VLC_AVAILABLE
+from src.ui.components.video_player import VideoPlayer, FFPY_AVAILABLE
 
 class MainWindow(ctk.CTk):
     """
     Fenêtre principale VibeSlicer (Nouvelle Architecture).
-    Intègre le VLCPlayer et répond aux événements du ProjectState.
+    Intègre le VideoPlayer (ffpyplayer) pour une sync A/V native.
     """
     
     def __init__(self, state: ProjectState):
@@ -22,15 +22,30 @@ class MainWindow(ctk.CTk):
         self.grid_rowconfigure(1, weight=0)  # Zone Timeline/Contrôles (Fixe)
         self.grid_columnconfigure(0, weight=1)
         
-        # --- 1. Zone Vidéo (VLC) ---
+        # --- 1. Zone Vidéo (ffpyplayer) ---
         self.video_container = ctk.CTkFrame(self, fg_color="black")
         self.video_container.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         
+        # Le VideoPlayer a besoin d'un Canvas pour dessiner
+        self.video_canvas = tk.Canvas(
+            self.video_container, 
+            bg="black", 
+            highlightthickness=0
+        )
+        self.video_canvas.pack(fill="both", expand=True)
+
         self.player = None
-        if VLC_AVAILABLE:
-            self.player = VLCPlayer(self.video_container, on_time_update=self._on_player_time_update)
+        if FFPY_AVAILABLE:
+            self.player = VideoPlayer(
+                self.video_canvas, 
+                on_frame_callback=self._on_player_time_update
+            )
         else:
-            self.error_label = ctk.CTkLabel(self.video_container, text="⚠️ VLC non détecté\nInstallez VLC 64-bit", text_color="red")
+            self.error_label = ctk.CTkLabel(
+                self.video_container, 
+                text="⚠️ ffpyplayer non détecté\nInstallez: pip install ffpyplayer", 
+                text_color="red"
+            )
             self.error_label.place(relx=0.5, rely=0.5, anchor="center")
         
         # --- 2. Zone Contrôles ---
