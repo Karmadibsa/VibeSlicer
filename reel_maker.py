@@ -90,7 +90,7 @@ if os.name == 'nt':
         # 3. Create a temporary config setup for this run
         # MoviePy sometimes checks for valid binary on import. 
     else:
-        print_warn("ImageMagick not found at expected path. Trying 'magick' in PATH...")
+        print("  ⚠ ImageMagick not found at expected path. Trying 'magick' in PATH...")
         os.environ["IMAGEMAGICK_BINARY"] = "magick"
 
 # ==================================================================================
@@ -141,8 +141,10 @@ def print_warn(msg):
 
 def format_time(ms):
     """Convert ms to MM:SS.mmm"""
-    td = timedelta(milliseconds=ms)
-    return str(td)[:-3]
+    total_s = ms / 1000.0
+    minutes = int(total_s // 60)
+    seconds = total_s % 60
+    return f"{minutes:02d}:{seconds:06.3f}"
 
 def get_font_path():
     asset_font = os.path.join(CONFIG["ASSETS_DIR"], CONFIG["FONT_NAME"])
@@ -268,14 +270,21 @@ def fast_cut_workflow(video_path):
             # Keep silence, effectively skipping logic
             pass
             
-    # Add remainder of video
-    video_len_ms = len(audio)
+    # Add remainder of video (use actual video duration, not audio len which can differ)
+    video_len_ms = video.duration * 1000.0
     if current_pos_ms < video_len_ms:
         seg = video.subclip(current_pos_ms / 1000.0, video_len_ms / 1000.0)
         final_clips.append(seg)
-        
+
+    # Guard: nothing to assemble
+    if not final_clips:
+        print_warn("Aucun clip à assembler — aucun contenu valide après les coupes.")
+        video.close()
+        return None
+
     print_step("Assembling clips...")
     final_cut = mp.concatenate_videoclips(final_clips)
+    video.close()
     return final_cut
 
 # ==================================================================================
@@ -353,10 +362,18 @@ def transcribe_and_burn(video_clip, original_filename):
     print_step("Phase 3: Burning Subtitles (Clean Style)")
     font_path = get_font_path()
     
+    # Align subtitle timestamps to exact video frames to avoid 1-3 frame drift
+    fps = video_clip.fps or 30
+    frame_duration = 1.0 / fps
+
     text_clips = []
     for item in final_words:
+        # Snap start/end to nearest video frame boundary
+        start_frame = round(item["start"] * fps) / fps
+        end_frame = round(item["end"] * fps) / fps
+        duration = max(frame_duration, end_frame - start_frame)
+
         # Create TextClip
-        # center, center
         txt = (mp.TextClip(
             item["word"],
             font=font_path,
@@ -367,8 +384,8 @@ def transcribe_and_burn(video_clip, original_filename):
             method='label'
         )
         .set_position(CONFIG["POS"])
-        .set_start(item["start"])
-        .set_duration(item["end"] - item["start"]))
+        .set_start(start_frame)
+        .set_duration(duration))
         
         text_clips.append(txt)
         
@@ -425,27 +442,43 @@ def main():
         # We need to wrap the whole process per file
         try:
             cut_clip = fast_cut_workflow(target_vid)
-            
+
+            # Guard: fast_cut_workflow returns None if no content after cuts
+            if cut_clip is None:
+                print_warn(f"Skipping {filename} — no content after cuts.")
+                continue
+
             # SAVE INTERMEDIATE CUT (Raw video before subtitles)
             name_root = os.path.splitext(filename)[0]
             raw_cut_name = f"Raw_Cut_{name_root}.mp4"
             raw_cut_path = os.path.join(CONFIG["OUTPUT_DIR"], raw_cut_name)
-            
+
             print_step(f"Saving Intermediate Cut Video to {raw_cut_path}...")
-            # Use same encoding settings as final export for consistency
-            cut_clip.write_videofile(
-                raw_cut_path,
-                fps=30,
-                codec="h264_nvenc", # Or libx264 if nvenc fails, but let's stick to default trial
-                audio_codec="aac",
-                threads=4,
-                preset="fast",
-                logger=None # Less spam
-            )
+            try:
+                cut_clip.write_videofile(
+                    raw_cut_path,
+                    fps=30,
+                    codec="h264_nvenc",
+                    audio_codec="aac",
+                    threads=4,
+                    preset="fast",
+                    logger=None
+                )
+            except Exception:
+                cut_clip.write_videofile(
+                    raw_cut_path,
+                    fps=30,
+                    codec="libx264",
+                    audio_codec="aac",
+                    logger=None
+                )
             print(f"{Fore.GREEN}>> Video monté (sans sous-titres) sauvegardé !{Style.RESET_ALL}")
-            
+
+            # Reload from disk so Whisper and composite use the exact same data as the saved file
+            cut_clip.close()
+            cut_clip = mp.VideoFileClip(raw_cut_path)
+
             # 2. Transcription & Burn
-            # Pass the filename to helper to generate better output name
             transcribe_and_burn(cut_clip, filename)
             
         except Exception as e:
