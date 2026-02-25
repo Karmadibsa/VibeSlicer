@@ -4,6 +4,7 @@ pydub
 colorama
 python-dotenv
 Pillow
+PyQt6
 
 torch
 torchaudio
