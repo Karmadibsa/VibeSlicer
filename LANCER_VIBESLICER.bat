@@ -21,8 +21,8 @@ echo Installation / Mise a jour des bibliotheques...
 pip install -r requirements.txt
 echo.
 
-:: Lancer le script
-python reel_maker.py
+:: Lancer l'interface graphique
+python gui.py
 
 echo.
 echo =======================================================

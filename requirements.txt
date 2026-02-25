@@ -3,6 +3,7 @@ faster-whisper
 pydub
 colorama
 python-dotenv
+Pillow
 
 torch
 torchaudio
