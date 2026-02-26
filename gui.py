@@ -5,13 +5,44 @@ Timeline + waveform + player vidéo intégré
 import os
 import sys
 import threading
+
+# ── Vérification précoce des dépendances critiques ────────────────────────────
+# On fait ça AVANT d'importer PyQt6, pour pouvoir afficher une vraie erreur.
+def _check_deps():
+    missing = []
+    try:
+        import PyQt6
+    except ImportError:
+        missing.append("PyQt6  →  pip install PyQt6")
+    try:
+        import numpy
+    except ImportError:
+        missing.append("numpy  →  pip install numpy")
+    try:
+        from PIL import Image
+    except ImportError:
+        missing.append("Pillow  →  pip install Pillow")
+    if missing:
+        msg = "Dépendances manquantes :\n\n" + "\n".join(missing)
+        msg += "\n\nLancez le .bat pour les installer automatiquement."
+        # Essai d'afficher une boîte Windows native sans PyQt6
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, msg, "VibeSlicer — Erreur de dépendances", 0x10)
+        except Exception:
+            print(msg)
+        sys.exit(1)
+
+_check_deps()
+
+# ── Imports PyQt6 (garantis disponibles après _check_deps) ───────────────────
 import numpy as np
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QSlider,
     QSplitter, QVBoxLayout, QHBoxLayout, QFileDialog, QListWidget,
     QListWidgetItem, QTabWidget, QPlainTextEdit, QProgressBar, QStatusBar,
-    QToolBar, QSizePolicy, QFrame, QScrollArea,
+    QToolBar, QSizePolicy, QFrame, QScrollArea, QMessageBox,
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QRect, QPoint, QSize,
@@ -1221,9 +1252,45 @@ class VibeSlicer(QMainWindow):
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Se placer dans le dossier du script (chemins relatifs input/output/assets)
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
     app = QApplication(sys.argv)
     app.setApplicationName("VibeSlicer Pro")
+
+    # Handler global pour les exceptions non rattrapées → boîte d'erreur visible
+    def _global_exception_hook(exc_type, exc_value, exc_tb):
+        import traceback
+        tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        print(tb_str, file=sys.stderr)
+        box = QMessageBox()
+        box.setWindowTitle("VibeSlicer — Erreur critique")
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setText(f"<b>Une erreur s'est produite :</b><br><br>{exc_type.__name__}: {exc_value}")
+        box.setDetailedText(tb_str)
+        box.exec()
+
+    sys.excepthook = _global_exception_hook
+
+    # Vérifier que reel_maker est importable (dépendances lourdes : moviepy, pydub…)
+    try:
+        import reel_maker  # noqa: F401 — on veut juste tester l'import
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        box = QMessageBox()
+        box.setWindowTitle("VibeSlicer — Dépendances manquantes")
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setText(
+            "<b>Impossible de charger le moteur de traitement vidéo.</b><br><br>"
+            "Vérifiez que toutes les dépendances sont installées (moviepy, pydub, "
+            "faster-whisper, ffmpeg…) en relançant le .bat.<br><br>"
+            f"<b>Erreur :</b> {e}"
+        )
+        box.setDetailedText(tb)
+        box.exec()
+        sys.exit(1)
+
     win = VibeSlicer()
     win.show()
     sys.exit(app.exec())
