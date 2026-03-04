@@ -203,23 +203,29 @@ class AssemblyWorker(QThread):
     finished = pyqtSignal(str)
     error    = pyqtSignal(str)
 
-    def __init__(self, video, silences, decisions, raw_cut_path):
+    def __init__(self, video_path, silences, decisions, raw_cut_path):
         super().__init__()
-        self._video       = video
-        self._silences    = silences
-        self._decisions   = decisions
+        self._video_path   = video_path   # pass path, not object — moviepy not thread-safe
+        self._silences     = silences
+        self._decisions    = decisions
         self._raw_cut_path = raw_cut_path
 
     def run(self):
         try:
             import reel_maker as rm
-            cb = lambda p, m: self.progress.emit(p, m)
-            cut_clip = rm.assemble_clips(self._video, self._silences, self._decisions, cb)
-            if cut_clip is None:
-                self.error.emit("Aucun contenu après les coupes.")
-                return
-            rm.save_raw_cut(cut_clip, self._raw_cut_path, cb)
-            self.finished.emit(self._raw_cut_path)
+            import moviepy.editor as mp
+            # Reload VideoFileClip inside this thread to avoid cross-thread issues
+            video = mp.VideoFileClip(self._video_path)
+            try:
+                cb = lambda p, m: self.progress.emit(p, m)
+                cut_clip = rm.assemble_clips(video, self._silences, self._decisions, cb)
+                if cut_clip is None:
+                    self.error.emit("Aucun contenu après les coupes.")
+                    return
+                rm.save_raw_cut(cut_clip, self._raw_cut_path, cb)
+                self.finished.emit(self._raw_cut_path)
+            finally:
+                video.close()
         except Exception as e:
             self.error.emit(str(e))
 
@@ -475,15 +481,17 @@ class VideoPlayerWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._video      = None
-        self._duration   = 0.0
-        self._pos        = 0.0
-        self._playing    = False
-        self._timer      = QTimer(self)
+        self._video       = None
+        self._video_path  = None   # needed for ffplay audio
+        self._duration    = 0.0
+        self._pos         = 0.0
+        self._playing     = False
+        self._timer       = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._fps        = 25.0
+        self._fps         = 25.0
         self._frame_cache = {}
         self._cache_size  = 30
+        self._audio_proc  = None   # subprocess for ffplay audio
 
         self._build_ui()
 
@@ -536,18 +544,21 @@ class VideoPlayerWidget(QWidget):
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
-    def load(self, video):
-        self._video    = video
-        self._duration = video.duration
-        self._fps      = video.fps or 25.0
-        self._pos      = 0.0
+    def load(self, video, video_path=None):
+        self._stop()
+        self._video       = video
+        self._video_path  = video_path
+        self._duration    = video.duration
+        self._fps         = video.fps or 25.0
+        self._pos         = 0.0
         self._frame_cache.clear()
         self._render_frame(0.0)
         self._update_time_label()
 
     def unload(self):
         self._stop()
-        self._video = None
+        self._video      = None
+        self._video_path = None
         self._frame_cache.clear()
         self._display.setPixmap(QPixmap())
         self._display.setText("Aucune vidéo chargée")
@@ -556,11 +567,17 @@ class VideoPlayerWidget(QWidget):
 
     def seek(self, seconds):
         seconds = max(0.0, min(seconds, self._duration))
+        was_playing = self._playing
+        if was_playing:
+            # Stop audio first so we don't have two streams at once
+            self._stop_audio()
         self._pos = seconds
         self._render_frame(seconds)
         self._update_seekbar()
         self._update_time_label()
         self.position_changed.emit(seconds)
+        if was_playing:
+            self._start_audio(seconds)
 
     def toggle_play(self):
         if self._playing:
@@ -575,11 +592,41 @@ class VideoPlayerWidget(QWidget):
         self._btn_play.setText("⏸")
         interval = max(20, int(1000 / self._fps))
         self._timer.start(interval)
+        self._start_audio(self._pos)
 
     def _stop(self):
         self._playing = False
         self._btn_play.setText("▶")
         self._timer.stop()
+        self._stop_audio()
+
+    # ── Audio playback (ffplay subprocess) ────────────────────────────────────
+
+    def _start_audio(self, pos):
+        """Launch ffplay in background for audio, starting at pos seconds."""
+        if not self._video_path:
+            return
+        import shutil
+        ffplay = shutil.which("ffplay")
+        if not ffplay:
+            return  # ffplay not in PATH — video still works, just silent
+        self._stop_audio()
+        import subprocess
+        self._audio_proc = subprocess.Popen(
+            [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet",
+             "-ss", str(pos), self._video_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    def _stop_audio(self):
+        """Terminate running ffplay process."""
+        if self._audio_proc and self._audio_proc.poll() is None:
+            self._audio_proc.terminate()
+            try:
+                self._audio_proc.wait(timeout=1)
+            except Exception:
+                self._audio_proc.kill()
+        self._audio_proc = None
 
     def _tick(self):
         if self._video is None:
@@ -1084,8 +1131,8 @@ class VibeSlicer(QMainWindow):
         self._audio_obj  = audio
         decisions = [True] * len(silences)
 
-        # Update player
-        self._player.load(video)
+        # Update player — pass video_path so audio playback works
+        self._player.load(video, self._video_path)
 
         # Update timeline
         self._timeline.load(
@@ -1151,7 +1198,7 @@ class VibeSlicer(QMainWindow):
         )
 
         self._worker_assembly = AssemblyWorker(
-            self._video_obj, self._silences, decisions, self._raw_cut_path
+            self._video_path, self._silences, decisions, self._raw_cut_path
         )
         self._worker_assembly.progress.connect(self._on_assemble_progress)
         self._worker_assembly.finished.connect(self._on_assemble_done)
