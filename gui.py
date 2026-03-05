@@ -313,9 +313,10 @@ class TimelineWidget(QWidget):
         self._scroll_px   = 0       # horizontal scroll offset in pixels
         self.in_ms        = None    # manual In point
         self.out_ms       = None    # manual Out point
-        # Drag-to-select state
-        self._drag_origin = None    # px where drag started
-        self._drag_end    = None    # px current drag position
+        # Cut Tool state
+        self._cut_mode     = False  # True = cut tool active
+        self._cut_start_ms = None   # first click position (pending second click)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # allow Escape key
 
     def load(self, duration_ms, silences, decisions, waveform):
         self.duration_ms = duration_ms
@@ -435,22 +436,28 @@ class TimelineWidget(QWidget):
                     p.setPen(QPen(border))
                     p.drawText(r, Qt.AlignmentFlag.AlignCenter, label)
 
-        # ── DRAG SELECTION (while user is dragging) ───────────────────────────
-        if self._drag_origin is not None and self._drag_end is not None:
-            dx1 = int(min(self._drag_origin, self._drag_end))
-            dx2 = int(max(self._drag_origin, self._drag_end))
-            if dx2 - dx1 > 6:
-                drag_rect = QRect(dx1, wave_y, dx2 - dx1, self.WAVE_H + self.SEG_H + 4)
-                p.fillRect(drag_rect, QColor(239, 68, 68, 55))   # semi-transparent red
-                p.setPen(QPen(QColor("#ef4444"), 2))
-                p.drawLine(dx1, ruler_y + 4, dx1, seg_y + self.SEG_H)
-                p.drawLine(dx2, ruler_y + 4, dx2, seg_y + self.SEG_H)
-                dur_ms = abs(self._px_to_ms(dx2) - self._px_to_ms(dx1))
-                p.setFont(QFont("Segoe UI", 9))
-                p.setPen(QPen(QColor("#ffffff")))
-                mid_x = (dx1 + dx2) // 2
-                lbl = f"✂ {dur_ms/1000:.1f}s"
-                p.drawText(mid_x - 24, wave_y + self.WAVE_H // 2 + 4, lbl)
+        # ── CUT TOOL — pending first marker ───────────────────────────────────
+        if self._cut_mode and self._cut_start_ms is not None:
+            cx = self._ms_to_px(self._cut_start_ms)
+            if 0 <= cx <= w:
+                # Highlight region from start marker to current wave area
+                p.fillRect(QRect(cx, wave_y, w - cx, self.WAVE_H + self.SEG_H + 4),
+                           QColor(249, 115, 22, 30))   # semi-transparent orange
+                p.setPen(QPen(QColor("#f97316"), 2, Qt.PenStyle.DashLine))
+                p.drawLine(cx, ruler_y, cx, seg_y + self.SEG_H)
+                p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+                p.setPen(QPen(QColor("#f97316")))
+                p.drawText(cx + 3, ruler_y + 12, "✂ début")
+
+        # ── CUT MODE INDICATOR ────────────────────────────────────────────────
+        if self._cut_mode:
+            p.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            p.setPen(QPen(QColor("#f97316")))
+            hint = ("✂  MODE COUPE  —  clic 2 : fin de zone  |  clic droit : annuler"
+                    if self._cut_start_ms is not None else
+                    "✂  MODE COUPE  —  clic 1 : début de zone  |  Échap : désactiver")
+            p.drawText(QRect(0, wave_y + 2, w - 4, 18),
+                       Qt.AlignmentFlag.AlignRight, hint)
 
         # ── IN/OUT SELECTION ─────────────────────────────────────────────────
         if self.in_ms is not None and self.out_ms is not None and self.in_ms < self.out_ms:
@@ -489,46 +496,74 @@ class TimelineWidget(QWidget):
         p.end()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            px = event.position().x()
+        px = event.position().x()
+
+        # Right-click in cut mode → cancel pending marker
+        if event.button() == Qt.MouseButton.RightButton and self._cut_mode:
+            self._cut_start_ms = None
+            self.update()
+            return
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        if self._cut_mode:
+            # ── CUT TOOL MODE ─────────────────────────────────────────────────
             idx = self._silence_at(px)
             if idx >= 0:
-                # Click on a silence block → toggle cut/keep instantly
+                # Click on existing zone → toggle keep/cut
+                self.silence_toggled.emit(idx)
+            elif self._cut_start_ms is None:
+                # First click → mark start of cut zone
+                self._cut_start_ms = max(0.0, self._px_to_ms(px))
+                self.update()
+            else:
+                # Second click → complete the zone
+                ms2 = min(float(self.duration_ms), self._px_to_ms(px))
+                ms1 = self._cut_start_ms
+                self._cut_start_ms = None
+                if abs(ms2 - ms1) > 200:
+                    self.zone_selected.emit(min(ms1, ms2), max(ms1, ms2))
+                self.update()
+        else:
+            # ── NORMAL MODE ───────────────────────────────────────────────────
+            idx = self._silence_at(px)
+            if idx >= 0:
+                # Click on silence → toggle
                 self.silence_toggled.emit(idx)
             else:
-                # Start a drag (might become zone selection or just a seek click)
-                self._drag_origin = px
-                self._drag_end    = px
+                # Click on empty area → seek
+                ms = max(0.0, self._px_to_ms(px))
+                self.seek_requested.emit(ms / 1000.0)
 
     def mouseMoveEvent(self, event):
-        if self._drag_origin is not None:
-            self._drag_end = event.position().x()
-            self.update()
-            # Change cursor when dragging to signal "cutting" mode
-            drag_px = abs(self._drag_end - self._drag_origin)
-            if drag_px > 12:
-                self.setCursor(Qt.CursorShape.SizeHorCursor)
+        # Update cursor style based on mode and state
+        if self._cut_mode:
+            if self._cut_start_ms is not None:
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self.setCursor(Qt.CursorShape.SplitHCursor)
+        else:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mouseReleaseEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton or self._drag_origin is None:
-            return
-        drag_px = abs(self._drag_end - self._drag_origin)
-        if drag_px < 12:
-            # Small movement → treat as a simple seek click
-            ms = max(0.0, self._px_to_ms(self._drag_origin))
-            self.seek_requested.emit(ms / 1000.0)
+        pass  # All actions handled in mousePressEvent
+
+    def set_cut_mode(self, enabled: bool):
+        """Activate / deactivate the Cut Tool."""
+        self._cut_mode     = enabled
+        self._cut_start_ms = None   # reset any pending marker
+        if enabled:
+            self.setCursor(Qt.CursorShape.SplitHCursor)
         else:
-            # Significant drag → create a cut zone
-            x1 = min(self._drag_origin, self._drag_end)
-            x2 = max(self._drag_origin, self._drag_end)
-            ms1 = max(0.0, self._px_to_ms(x1))
-            ms2 = min(float(self.duration_ms), self._px_to_ms(x2))
-            if ms2 - ms1 > 200:   # at least 200ms to avoid accidental tiny zones
-                self.zone_selected.emit(ms1, ms2)
-        self._drag_origin = None
-        self._drag_end    = None
-        self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and self._cut_mode:
+            self._cut_start_ms = None
+            self.update()
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -1092,10 +1127,38 @@ class VibeSlicer(QMainWindow):
         tl_v.setSpacing(2)
 
         tl_header = QHBoxLayout()
-        tl_lbl = QLabel("TIMELINE  —  🖱 glisser = marquer zone à couper  |  clic silence = couper/garder  |  scroll = zoom")
+        tl_lbl = QLabel("TIMELINE  —  scroll = zoom  |  clic silence = couper/garder  |  Mode Coupe : clic×2 pour zone manuelle")
         tl_lbl.setStyleSheet("color: #6b6890; font-size: 11px;")
         tl_header.addWidget(tl_lbl)
         tl_header.addStretch()
+
+        # Cut Tool toggle button
+        self._btn_cut_mode = QPushButton("✂ Mode Coupe")
+        self._btn_cut_mode.setCheckable(True)
+        self._btn_cut_mode.setChecked(False)
+        self._btn_cut_mode.setFixedHeight(24)
+        self._btn_cut_mode.setToolTip(
+            "Activer l'outil coupe :\n"
+            "  • Clic 1 : marquer le début de la zone\n"
+            "  • Clic 2 : marquer la fin → zone créée\n"
+            "  • Clic droit : annuler le 1er marqueur\n"
+            "  • Échap : désactiver le mode"
+        )
+        self._btn_cut_mode.setStyleSheet("""
+            QPushButton {
+                background: #242336; color: #f97316;
+                border: 1px solid #3a3858; border-radius: 3px;
+                font-size: 11px; font-weight: bold; padding: 0 10px;
+            }
+            QPushButton:checked {
+                background: #f97316; color: white;
+                border: 1px solid #f97316;
+            }
+            QPushButton:hover { background: #3a3858; color: #ffffff; }
+        """)
+        self._btn_cut_mode.toggled.connect(self._on_toggle_cut_mode)
+        tl_header.addWidget(self._btn_cut_mode)
+
         # In/Out manual cut buttons
         self._btn_in  = QPushButton("[ In")
         self._btn_out = QPushButton("Out ]")
@@ -1416,6 +1479,22 @@ class VibeSlicer(QMainWindow):
             self._silences, old_decisions, self._timeline.waveform
         )
         self._dbg(f"Zone supprimée : {removed[0]}ms → {removed[1]}ms", "WARN")
+
+    # ── CUT TOOL TOGGLE ───────────────────────────────────────────────────────
+
+    def _on_toggle_cut_mode(self, checked):
+        self._timeline.set_cut_mode(checked)
+        if checked:
+            self._dbg(
+                "Mode Coupe ON — clic 1 : début de zone | clic 2 : fin | clic droit : annuler",
+                "INFO"
+            )
+            self._statusbar.showMessage(
+                "✂ Mode Coupe actif — Clic 1 : début, Clic 2 : fin de zone | Clic droit / Échap : annuler"
+            )
+        else:
+            self._dbg("Mode Coupe désactivé — mode normal", "INFO")
+            self._statusbar.showMessage("Mode normal — cliquez sur la timeline pour naviguer")
 
     # ── ASSEMBLY ──────────────────────────────────────────────────────────────
 

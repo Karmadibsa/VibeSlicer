@@ -34,6 +34,22 @@ if %errorlevel% neq 0 (
 )
 echo.
 
+:: Forcer PyTorch CPU-only (evite les erreurs c10.dll / CUDA)
+echo Verification de PyTorch CPU-only...
+python -c "import torch; ok = '+cpu' in torch.__version__; exit(0 if ok else 1)" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [INFO] Version GPU de PyTorch detectee - remplacement par la version CPU...
+    pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cpu
+    if %errorlevel% neq 0 (
+        echo [WARN] Impossible d'installer PyTorch CPU. La transcription pourrait echouer.
+    ) else (
+        echo [OK] PyTorch CPU-only installe avec succes.
+    )
+) else (
+    echo [OK] PyTorch CPU-only deja installe.
+)
+echo.
+
 :: Verifier que PyQt6 est bien installe
 python -c "import PyQt6" >nul 2>&1
 if %errorlevel% neq 0 (
