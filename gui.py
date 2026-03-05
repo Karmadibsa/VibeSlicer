@@ -46,13 +46,19 @@ from PyQt6.QtWidgets import (
     QToolBar, QSizePolicy, QFrame, QScrollArea, QMessageBox,
 )
 from PyQt6.QtCore import (
-    Qt, QThread, pyqtSignal, QTimer, QRect, QPoint, QSize,
+    Qt, QThread, pyqtSignal, QTimer, QRect, QPoint, QSize, QUrl,
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QFontMetrics,
     QPixmap, QImage, QLinearGradient, QPalette, QIcon,
     QAction,
 )
+try:
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PyQt6.QtMultimediaWidgets import QVideoWidget
+    QMEDIA_OK = True
+except ImportError:
+    QMEDIA_OK = False
 
 try:
     from PIL import Image
@@ -506,25 +512,16 @@ class TimelineWidget(QWidget):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class VideoPlayerWidget(QWidget):
+    """
+    Lecteur vidéo basé sur QMediaPlayer — synchronisation A/V native.
+    Plus de QTimer, plus de ffplay, plus de get_frame() bloquant.
+    """
     position_changed = pyqtSignal(float)  # seconds
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._video           = None
-        self._video_path      = None    # needed for ffplay audio
         self._duration        = 0.0
-        self._pos             = 0.0
-        self._playing         = False
-        self._timer           = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._fps             = 25.0
-        self._frame_cache     = {}
-        self._cache_size      = 30
-        self._audio_proc      = None    # subprocess for ffplay audio
-        # Wall-clock sync — avoids accumulated timer drift
-        self._play_wall_start = None    # time.perf_counter() when play started
-        self._play_pos_start  = 0.0    # self._pos when play started
-
+        self._slider_dragging = False
         self._build_ui()
 
     def _build_ui(self):
@@ -532,20 +529,40 @@ class VideoPlayerWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        # Display
-        self._display = QLabel()
-        self._display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._display.setStyleSheet("background: #000; border-radius: 4px;")
-        self._display.setMinimumSize(480, 270)
-        self._display.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._display.setText("Aucune vidéo chargée")
-        self._display.setStyleSheet("background: #000; color: #444; font-size: 14px;")
-        layout.addWidget(self._display, 1)
+        if QMEDIA_OK:
+            # ── QVideoWidget : rendu matériel natif ───────────────────────────
+            self._video_widget = QVideoWidget()
+            self._video_widget.setMinimumSize(480, 270)
+            self._video_widget.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self._video_widget.setStyleSheet("background: #000; border-radius: 4px;")
+            layout.addWidget(self._video_widget, 1)
+
+            # ── QMediaPlayer : A/V sync géré nativement par Qt ───────────────
+            self._media = QMediaPlayer()
+            self._audio_out = QAudioOutput()
+            self._audio_out.setVolume(1.0)
+            self._media.setAudioOutput(self._audio_out)
+            self._media.setVideoOutput(self._video_widget)
+
+            self._media.positionChanged.connect(self._on_position_changed)
+            self._media.durationChanged.connect(self._on_duration_changed)
+            self._media.playbackStateChanged.connect(self._on_state_changed)
+        else:
+            # Fallback : QLabel si QtMultimedia non disponible
+            self._media = None
+            lbl = QLabel("⚠ QtMultimedia non disponible\npip install PyQt6")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("background:#000; color:#ef4444; font-size:13px;")
+            lbl.setMinimumSize(480, 270)
+            layout.addWidget(lbl, 1)
 
         # Seekbar
         self._seekbar = QSlider(Qt.Orientation.Horizontal)
         self._seekbar.setRange(0, 10000)
-        self._seekbar.sliderMoved.connect(self._seek_from_slider)
+        self._seekbar.sliderPressed.connect(self._on_slider_pressed)
+        self._seekbar.sliderReleased.connect(self._on_slider_released)
+        self._seekbar.sliderMoved.connect(self._on_slider_moved)
         layout.addWidget(self._seekbar)
 
         # Controls
@@ -576,166 +593,96 @@ class VideoPlayerWidget(QWidget):
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
+    # ── Public API ────────────────────────────────────────────────────────────
+
     def load(self, video, video_path=None):
-        self._stop()
-        self._video       = video
-        self._video_path  = video_path
-        self._duration    = video.duration
-        self._fps         = video.fps or 25.0
-        self._pos         = 0.0
-        self._frame_cache.clear()
-        self._render_frame(0.0)
-        self._update_time_label()
+        """Charge la vidéo dans QMediaPlayer. `video` sert pour la durée fallback."""
+        if not QMEDIA_OK or self._media is None:
+            return
+        self._media.stop()
+        if video_path:
+            self._media.setSource(QUrl.fromLocalFile(os.path.abspath(video_path)))
+        if video:
+            self._duration = video.duration  # updated by durationChanged signal
+        self._update_time_label(0.0)
 
     def unload(self):
-        self._stop()
-        self._video      = None
-        self._video_path = None
-        self._frame_cache.clear()
-        self._display.setPixmap(QPixmap())
-        self._display.setText("Aucune vidéo chargée")
+        if self._media:
+            self._media.stop()
+            self._media.setSource(QUrl())
+        self._duration = 0.0
         self._seekbar.setValue(0)
         self._time_lbl.setText("00:00 / 00:00")
 
     def seek(self, seconds):
-        seconds = max(0.0, min(seconds, self._duration))
-        was_playing = self._playing
-        if was_playing:
-            # Stop audio first so we don't have two streams at once
-            self._stop_audio()
-        self._pos = seconds
-        self._render_frame(seconds)
-        self._update_seekbar()
-        self._update_time_label()
-        self.position_changed.emit(seconds)
-        if was_playing:
-            # Re-anchor wall clock to new seek position
-            self._play_wall_start = time.perf_counter()
-            self._play_pos_start  = seconds
-            self._start_audio(seconds)
+        if not self._media:
+            return
+        ms = max(0, min(int(seconds * 1000), int(self._duration * 1000)))
+        self._media.setPosition(ms)
 
     def toggle_play(self):
-        if self._playing:
-            self._stop()
+        if not self._media:
+            return
+        if self._media.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._media.pause()
         else:
-            self._play()
+            self._media.play()
 
-    def _play(self):
-        if self._video is None:
-            return
-        self._playing = True
-        self._btn_play.setText("⏸")
-        self._play_wall_start = time.perf_counter()
-        self._play_pos_start  = self._pos
-        interval = max(20, int(1000 / self._fps))
-        self._timer.start(interval)
-        self._start_audio(self._pos)
+    @property
+    def _pos(self):
+        """Position actuelle en secondes (compatibilité avec VibeSlicer._on_set_in/out)."""
+        if self._media is None:
+            return 0.0
+        return self._media.position() / 1000.0
 
-    def _stop(self):
-        self._playing = False
-        self._btn_play.setText("▶")
-        self._play_wall_start = None
-        self._timer.stop()
-        self._stop_audio()
+    # ── QMediaPlayer signal handlers ──────────────────────────────────────────
 
-    # ── Audio playback (ffplay subprocess) ────────────────────────────────────
-
-    def _start_audio(self, pos):
-        """Launch ffplay in background for audio, starting at pos seconds."""
-        if not self._video_path:
-            return
-        import shutil
-        ffplay = shutil.which("ffplay")
-        if not ffplay:
-            return  # ffplay not in PATH — video still works, just silent
-        self._stop_audio()
-        import subprocess
-        self._audio_proc = subprocess.Popen(
-            [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet",
-             "-ss", str(pos), self._video_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-
-    def _stop_audio(self):
-        """Terminate running ffplay process."""
-        if self._audio_proc and self._audio_proc.poll() is None:
-            self._audio_proc.terminate()
-            try:
-                self._audio_proc.wait(timeout=1)
-            except Exception:
-                self._audio_proc.kill()
-        self._audio_proc = None
-
-    def _tick(self):
-        if self._video is None:
-            self._stop()
-            return
-        # Wall-clock based position (no accumulated drift)
-        if self._play_wall_start is not None:
-            elapsed = time.perf_counter() - self._play_wall_start
-            self._pos = min(self._play_pos_start + elapsed, self._duration)
-        else:
-            self._pos = min(self._pos + 1.0 / self._fps, self._duration)
-        self._render_frame(self._pos)
-        self._update_seekbar()
-        self._update_time_label()
-        self.position_changed.emit(self._pos)
-        if self._pos >= self._duration:
-            self._stop()
-
-    def _render_frame(self, t):
-        if self._video is None or not PIL_OK:
-            return
-        # Round to nearest frame
-        t = round(t * self._fps) / self._fps
-        t = min(t, self._duration - 1 / self._fps)
-        key = round(t * self._fps)
-        if key in self._frame_cache:
-            self._display.setPixmap(self._frame_cache[key])
-            return
-        try:
-            frame = self._video.get_frame(t)  # numpy HxWx3
-            h, w, _ = frame.shape
-            qimg = QImage(frame.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
-            # Scale to display size preserving ratio
-            dw = self._display.width()
-            dh = self._display.height()
-            pix = QPixmap.fromImage(qimg).scaled(
-                dw, dh, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            # Cache management
-            if len(self._frame_cache) >= self._cache_size:
-                oldest = next(iter(self._frame_cache))
-                del self._frame_cache[oldest]
-            self._frame_cache[key] = pix
-            self._display.setPixmap(pix)
-        except Exception:
-            pass
-
-    def _seek_from_slider(self, val):
-        if self._duration > 0:
-            t = val / 10000 * self._duration
-            self.seek(t)
-
-    def _update_seekbar(self):
-        if self._duration > 0:
-            val = int(self._pos / self._duration * 10000)
+    def _on_position_changed(self, ms):
+        seconds = ms / 1000.0
+        if not self._slider_dragging and self._duration > 0:
+            val = int(ms / (self._duration * 1000) * 10000)
             self._seekbar.blockSignals(True)
             self._seekbar.setValue(val)
             self._seekbar.blockSignals(False)
+        self._update_time_label(seconds)
+        self.position_changed.emit(seconds)
+
+    def _on_duration_changed(self, ms):
+        if ms > 0:
+            self._duration = ms / 1000.0
+
+    def _on_state_changed(self, state):
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._btn_play.setText("⏸")
+        else:
+            self._btn_play.setText("▶")
+
+    # ── Seekbar ───────────────────────────────────────────────────────────────
+
+    def _on_slider_pressed(self):
+        self._slider_dragging = True
+
+    def _on_slider_moved(self, val):
+        if self._duration > 0:
+            self._update_time_label(val / 10000 * self._duration)
+
+    def _on_slider_released(self):
+        self._slider_dragging = False
+        if self._media and self._duration > 0:
+            ms = int(self._seekbar.value() / 10000 * self._duration * 1000)
+            self._media.setPosition(ms)
 
     def _skip_back(self):
-        self.seek(max(0, self._pos - 5))
+        self.seek(max(0.0, self._pos - 5.0))
 
     def _skip_fwd(self):
-        self.seek(min(self._duration, self._pos + 5))
+        self.seek(min(self._duration, self._pos + 5.0))
 
-    def _update_time_label(self):
+    def _update_time_label(self, seconds):
         def fmt(s):
             m = int(s // 60)
             return f"{m:02d}:{s % 60:05.2f}"
-        self._time_lbl.setText(f"{fmt(self._pos)} / {fmt(self._duration)}")
+        self._time_lbl.setText(f"{fmt(seconds)} / {fmt(self._duration)}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

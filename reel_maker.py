@@ -150,8 +150,28 @@ def extract_and_detect_silences(video_path, silence_thresh=None, min_silence_len
         else:
             print_info(msg)
 
-    _progress(0.0, "Chargement de la vidéo...")
-    video = mp.VideoFileClip(video_path)
+    # ── Normalisation CFR (Constant Frame Rate) ───────────────────────────────
+    # Les vidéos VFR (smartphones, captures d'écran) causent des désynchros à l'export.
+    # On convertit en CFR 30fps via ffmpeg AVANT toute analyse.
+    _progress(0.0, "Normalisation CFR (30fps)...")
+    cfr_path = os.path.join(CONFIG["TEMP_DIR"], "temp_cfr.mp4")
+    try:
+        cfr_result = subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path,
+             "-c:v", "libx264", "-crf", "18", "-preset", "ultrafast",
+             "-r", "30", "-c:a", "aac", "-b:a", "192k",
+             cfr_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300
+        )
+        if cfr_result.returncode == 0 and os.path.exists(cfr_path):
+            working_path = cfr_path
+        else:
+            working_path = video_path  # Fallback: use original
+    except Exception:
+        working_path = video_path  # Fallback if ffmpeg missing
+
+    _progress(0.05, "Chargement de la vidéo normalisée...")
+    video = mp.VideoFileClip(working_path)
 
     audio_path = os.path.join(CONFIG["TEMP_DIR"], "temp_audio.wav")
     _progress(0.1, "Extraction de l'audio...")
