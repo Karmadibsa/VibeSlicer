@@ -206,7 +206,8 @@ def assemble_clips(video, silences, decisions, progress_callback=None):
 
     _progress(0.9, "Assemblage des clips...")
     final_cut = mp.concatenate_videoclips(final_clips)
-    video.close()
+    # NOTE: do NOT close video here — subclips are lazy and still need the source
+    # when write_videofile is called in save_raw_cut. The caller closes it.
     _progress(1.0, "Assemblage terminé.")
     return final_cut
 

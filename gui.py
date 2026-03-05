@@ -4,6 +4,7 @@ Timeline + waveform + player vidéo intégré
 """
 import os
 import sys
+import time
 import threading
 
 # ── Vérification précoce des dépendances critiques ────────────────────────────
@@ -303,6 +304,8 @@ class TimelineWidget(QWidget):
         self.playhead_ms  = 0
         self._zoom        = 1.0     # pixels per ms
         self._scroll_px   = 0       # horizontal scroll offset in pixels
+        self.in_ms        = None    # manual In point
+        self.out_ms       = None    # manual Out point
 
     def load(self, duration_ms, silences, decisions, waveform):
         self.duration_ms = duration_ms
@@ -320,6 +323,11 @@ class TimelineWidget(QWidget):
         if 0 <= idx < len(self.decisions):
             self.decisions[idx] = cut
             self.update()
+
+    def set_in_out(self, in_ms, out_ms):
+        self.in_ms  = in_ms
+        self.out_ms = out_ms
+        self.update()
 
     def _ms_to_px(self, ms):
         return int(ms * self._zoom) - self._scroll_px + 10
@@ -417,6 +425,27 @@ class TimelineWidget(QWidget):
                     p.setPen(QPen(border))
                     p.drawText(r, Qt.AlignmentFlag.AlignCenter, label)
 
+        # ── IN/OUT SELECTION ─────────────────────────────────────────────────
+        if self.in_ms is not None and self.out_ms is not None and self.in_ms < self.out_ms:
+            ix1 = self._ms_to_px(self.in_ms)
+            ix2 = self._ms_to_px(self.out_ms)
+            sel = QRect(ix1, wave_y, ix2 - ix1, self.WAVE_H)
+            p.fillRect(sel, QColor(59, 130, 246, 45))   # semi-transparent blue
+        if self.in_ms is not None:
+            ix = self._ms_to_px(self.in_ms)
+            if 0 <= ix <= w:
+                p.setPen(QPen(QColor("#3b82f6"), 2))    # blue — In
+                p.drawLine(ix, ruler_y, ix, seg_y + self.SEG_H)
+                p.setFont(QFont("Segoe UI", 8))
+                p.drawText(ix + 3, ruler_y + 12, "IN")
+        if self.out_ms is not None:
+            ox = self._ms_to_px(self.out_ms)
+            if 0 <= ox <= w:
+                p.setPen(QPen(QColor("#f97316"), 2))    # orange — Out
+                p.drawLine(ox, ruler_y, ox, seg_y + self.SEG_H)
+                p.setFont(QFont("Segoe UI", 8))
+                p.drawText(ox + 3, ruler_y + 12, "OUT")
+
         # ── PLAYHEAD ─────────────────────────────────────────────────────────
         ph_x = self._ms_to_px(self.playhead_ms)
         if 0 <= ph_x <= w:
@@ -481,17 +510,20 @@ class VideoPlayerWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._video       = None
-        self._video_path  = None   # needed for ffplay audio
-        self._duration    = 0.0
-        self._pos         = 0.0
-        self._playing     = False
-        self._timer       = QTimer(self)
+        self._video           = None
+        self._video_path      = None    # needed for ffplay audio
+        self._duration        = 0.0
+        self._pos             = 0.0
+        self._playing         = False
+        self._timer           = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._fps         = 25.0
-        self._frame_cache = {}
-        self._cache_size  = 30
-        self._audio_proc  = None   # subprocess for ffplay audio
+        self._fps             = 25.0
+        self._frame_cache     = {}
+        self._cache_size      = 30
+        self._audio_proc      = None    # subprocess for ffplay audio
+        # Wall-clock sync — avoids accumulated timer drift
+        self._play_wall_start = None    # time.perf_counter() when play started
+        self._play_pos_start  = 0.0    # self._pos when play started
 
         self._build_ui()
 
@@ -577,6 +609,9 @@ class VideoPlayerWidget(QWidget):
         self._update_time_label()
         self.position_changed.emit(seconds)
         if was_playing:
+            # Re-anchor wall clock to new seek position
+            self._play_wall_start = time.perf_counter()
+            self._play_pos_start  = seconds
             self._start_audio(seconds)
 
     def toggle_play(self):
@@ -590,6 +625,8 @@ class VideoPlayerWidget(QWidget):
             return
         self._playing = True
         self._btn_play.setText("⏸")
+        self._play_wall_start = time.perf_counter()
+        self._play_pos_start  = self._pos
         interval = max(20, int(1000 / self._fps))
         self._timer.start(interval)
         self._start_audio(self._pos)
@@ -597,6 +634,7 @@ class VideoPlayerWidget(QWidget):
     def _stop(self):
         self._playing = False
         self._btn_play.setText("▶")
+        self._play_wall_start = None
         self._timer.stop()
         self._stop_audio()
 
@@ -632,8 +670,12 @@ class VideoPlayerWidget(QWidget):
         if self._video is None:
             self._stop()
             return
-        step = 1.0 / self._fps
-        self._pos = min(self._pos + step, self._duration)
+        # Wall-clock based position (no accumulated drift)
+        if self._play_wall_start is not None:
+            elapsed = time.perf_counter() - self._play_wall_start
+            self._pos = min(self._play_pos_start + elapsed, self._duration)
+        else:
+            self._pos = min(self._pos + 1.0 / self._fps, self._duration)
         self._render_frame(self._pos)
         self._update_seekbar()
         self._update_time_label()
@@ -918,6 +960,61 @@ class RightPanel(QWidget):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# DEBUG PANEL
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DebugPanel(QWidget):
+    """Collapsible log panel shown at the bottom of the window."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 2, 6, 4)
+        layout.setSpacing(2)
+
+        header = QHBoxLayout()
+        lbl = QLabel("🪲  DEBUG LOG")
+        lbl.setStyleSheet("color: #facc15; font-size: 11px; font-weight: bold;")
+        header.addWidget(lbl)
+
+        self._clear_btn = QPushButton("Vider")
+        self._clear_btn.setFixedSize(52, 20)
+        self._clear_btn.setStyleSheet("""
+            QPushButton { background: #242336; color: #9896b8; border: none;
+                          border-radius: 3px; font-size: 10px; }
+            QPushButton:hover { background: #3a3858; color: white; }
+        """)
+        self._clear_btn.clicked.connect(self._clear)
+        header.addWidget(self._clear_btn)
+        header.addStretch()
+        layout.addLayout(header)
+
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumBlockCount(300)
+        self._log.setStyleSheet("""
+            QPlainTextEdit {
+                background: #08071a; color: #22c55e;
+                font-family: Consolas, monospace; font-size: 11px;
+                border: 1px solid #1e1c2e; border-radius: 3px;
+            }
+        """)
+        self._log.setFixedHeight(120)
+        layout.addWidget(self._log)
+
+    def log(self, msg: str, level: str = "INFO"):
+        ts    = time.strftime("%H:%M:%S")
+        icons = {"INFO": "·", "WARN": "⚠", "ERROR": "✖", "DEBUG": "›", "OK": "✔"}
+        icon  = icons.get(level, "·")
+        self._log.appendPlainText(f"[{ts}] {icon} {msg}")
+        sb = self._log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _clear(self):
+        self._log.clear()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # MAIN WINDOW
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -935,6 +1032,9 @@ class VibeSlicer(QMainWindow):
         self._raw_cut_path  = None
         self._txt_path      = None
         self._audio_obj     = None
+        # Manual cut In/Out points (ms)
+        self._in_ms         = None
+        self._out_ms        = None
 
         self._build_ui()
         self.setStyleSheet(STYLE_MAIN)
@@ -973,6 +1073,9 @@ class VibeSlicer(QMainWindow):
         self._right = RightPanel()
         self._right.decision_changed.connect(self._on_decision_changed)
         self._right._btn_export.clicked.connect(self._start_export)
+        self._right._silence_list.currentRowChanged.connect(
+            lambda row: self._btn_del_zone.setEnabled(row >= 0 and bool(self._silences))
+        )
         top_split.addWidget(self._right)
 
         top_split.setSizes([720, 380])
@@ -985,9 +1088,48 @@ class VibeSlicer(QMainWindow):
         timeline_frame.setStyleSheet("background: #12111e; border-top: 2px solid #242336;")
         tl_v = QVBoxLayout(timeline_frame)
         tl_v.setContentsMargins(8, 4, 8, 4)
-        tl_lbl = QLabel("TIMELINE  —  clic sur un silence (rouge=couper / vert=garder)  |  scroll = zoom")
-        tl_lbl.setStyleSheet("color: #6b6890; font-size: 11px; padding: 0;")
-        tl_v.addWidget(tl_lbl)
+        tl_v.setSpacing(2)
+
+        tl_header = QHBoxLayout()
+        tl_lbl = QLabel("TIMELINE  —  clic silence = couper/garder  |  scroll = zoom")
+        tl_lbl.setStyleSheet("color: #6b6890; font-size: 11px;")
+        tl_header.addWidget(tl_lbl)
+        tl_header.addStretch()
+        # In/Out manual cut buttons
+        self._btn_in  = QPushButton("[ In")
+        self._btn_out = QPushButton("Out ]")
+        self._btn_add = QPushButton("➕ Ajouter zone")
+        self._btn_del_zone = QPushButton("✖ Supprimer zone sélectionnée")
+        for b, tip in [
+            (self._btn_in,  "Marquer le début de la zone à couper (position playhead)"),
+            (self._btn_out, "Marquer la fin de la zone à couper (position playhead)"),
+            (self._btn_add, "Ajouter la zone In→Out comme coupe manuelle"),
+            (self._btn_del_zone, "Supprimer la zone sélectionnée dans la liste"),
+        ]:
+            b.setFixedHeight(24)
+            b.setToolTip(tip)
+            b.setStyleSheet("""
+                QPushButton { background: #242336; color: #9896b8; border: none;
+                              border-radius: 3px; font-size: 11px; padding: 0 8px; }
+                QPushButton:hover { background: #3a3858; color: white; }
+                QPushButton:disabled { color: #3a3858; }
+            """)
+        self._btn_in.setStyleSheet(self._btn_in.styleSheet().replace("#9896b8", "#3b82f6"))
+        self._btn_out.setStyleSheet(self._btn_out.styleSheet().replace("#9896b8", "#f97316"))
+        self._btn_add.setStyleSheet(self._btn_add.styleSheet().replace("#9896b8", "#22c55e"))
+        self._btn_del_zone.setStyleSheet(self._btn_del_zone.styleSheet().replace("#9896b8", "#ef4444"))
+        self._btn_add.setEnabled(False)
+        self._btn_del_zone.setEnabled(False)
+        self._btn_in.clicked.connect(self._on_set_in)
+        self._btn_out.clicked.connect(self._on_set_out)
+        self._btn_add.clicked.connect(self._on_add_manual_zone)
+        self._btn_del_zone.clicked.connect(self._on_delete_selected_zone)
+        tl_header.addWidget(self._btn_in)
+        tl_header.addWidget(self._btn_out)
+        tl_header.addWidget(self._btn_add)
+        tl_header.addWidget(self._btn_del_zone)
+        tl_v.addLayout(tl_header)
+
         self._timeline = TimelineWidget()
         self._timeline.seek_requested.connect(self._on_timeline_seek)
         self._timeline.silence_toggled.connect(self._on_silence_toggled)
@@ -997,6 +1139,11 @@ class VibeSlicer(QMainWindow):
         # Bottom bar: action buttons + progress
         bottom = self._build_bottom_bar()
         main_v.addWidget(bottom)
+
+        # Debug panel (hidden by default)
+        self._debug_panel = DebugPanel()
+        self._debug_panel.setVisible(False)
+        main_v.addWidget(self._debug_panel)
 
         # Status bar
         self._statusbar = QStatusBar()
@@ -1020,6 +1167,12 @@ class VibeSlicer(QMainWindow):
         open_btn = QAction("📂  Ouvrir vidéo", self)
         open_btn.triggered.connect(self._pick_file)
         tb.addAction(open_btn)
+
+        self._debug_btn = QAction("🪲  Debug", self)
+        self._debug_btn.setCheckable(True)
+        self._debug_btn.setChecked(False)
+        self._debug_btn.triggered.connect(self._toggle_debug)
+        tb.addAction(self._debug_btn)
 
     def _build_params_bar(self):
         w = QWidget()
@@ -1123,9 +1276,10 @@ class VibeSlicer(QMainWindow):
     def _on_analysis_progress(self, p, msg):
         self._progress.setValue(int(p * 100))
         self._progress_lbl.setText(msg)
-        self._statusbar.showMessage(msg)
+        self._dbg(f"[Analyse {int(p*100)}%] {msg}")
 
     def _on_analysis_done(self, video, silences, waveform, audio):
+        self._dbg(f"Analyse terminée — {len(silences)} silence(s)", "OK")
         self._video_obj  = video
         self._silences   = silences
         self._audio_obj  = audio
@@ -1158,7 +1312,8 @@ class VibeSlicer(QMainWindow):
         self._btn_analyse.setEnabled(True)
         self._progress.setValue(0)
         self._progress_lbl.setText("Erreur !")
-        self._statusbar.showMessage(f"❌ Erreur analyse : {err}")
+        self._dbg(f"Erreur analyse : {err}", "ERROR")
+        self._statusbar.showMessage(f"❌ {err}")
 
     # ── SILENCE INTERACTIONS ──────────────────────────────────────────────────
 
@@ -1177,6 +1332,78 @@ class VibeSlicer(QMainWindow):
 
     def _on_timeline_seek(self, seconds):
         self._player.seek(seconds)
+
+    # ── DEBUG TOGGLE ──────────────────────────────────────────────────────────
+
+    def _toggle_debug(self, checked):
+        self._debug_panel.setVisible(checked)
+
+    def _dbg(self, msg, level="INFO"):
+        self._debug_panel.log(msg, level)
+        self._statusbar.showMessage(msg)
+
+    # ── MANUAL IN/OUT CUT ZONES ───────────────────────────────────────────────
+
+    def _on_set_in(self):
+        pos_ms = int(self._player._pos * 1000)
+        self._in_ms = pos_ms
+        self._timeline.set_in_out(self._in_ms, self._out_ms)
+        self._update_inout_btn()
+        self._dbg(f"In point : {pos_ms}ms ({self._player._pos:.2f}s)", "DEBUG")
+
+    def _on_set_out(self):
+        pos_ms = int(self._player._pos * 1000)
+        self._out_ms = pos_ms
+        self._timeline.set_in_out(self._in_ms, self._out_ms)
+        self._update_inout_btn()
+        self._dbg(f"Out point : {pos_ms}ms ({self._player._pos:.2f}s)", "DEBUG")
+
+    def _update_inout_btn(self):
+        ok = (self._in_ms is not None and self._out_ms is not None
+              and self._in_ms < self._out_ms
+              and bool(self._silences))
+        self._btn_add.setEnabled(ok)
+
+    def _on_add_manual_zone(self):
+        if self._in_ms is None or self._out_ms is None or self._in_ms >= self._out_ms:
+            return
+        if not self._silences:
+            return
+        new_zone = (self._in_ms, self._out_ms)
+        old_decisions = self._right.decisions
+        # Insert in sorted order
+        self._silences.append(new_zone)
+        self._silences.sort(key=lambda x: x[0])
+        idx = self._silences.index(new_zone)
+        old_decisions.insert(idx, True)  # default: cut the new zone
+        # Reload UI
+        self._right.load_silences(self._silences, old_decisions)
+        self._timeline.load(
+            int(self._video_obj.duration * 1000),
+            self._silences, old_decisions, self._timeline.waveform
+        )
+        # Reset In/Out
+        self._in_ms  = None
+        self._out_ms = None
+        self._timeline.set_in_out(None, None)
+        self._btn_add.setEnabled(False)
+        dur = new_zone[1] - new_zone[0]
+        self._dbg(f"Zone manuelle ajoutée : {new_zone[0]}ms → {new_zone[1]}ms ({dur}ms)", "OK")
+
+    def _on_delete_selected_zone(self):
+        """Remove the silence zone selected in the right-panel list."""
+        idx = self._right._silence_list.currentRow()
+        if idx < 0 or idx >= len(self._silences):
+            return
+        removed = self._silences.pop(idx)
+        old_decisions = self._right.decisions
+        old_decisions.pop(idx)
+        self._right.load_silences(self._silences, old_decisions)
+        self._timeline.load(
+            int(self._video_obj.duration * 1000),
+            self._silences, old_decisions, self._timeline.waveform
+        )
+        self._dbg(f"Zone supprimée : {removed[0]}ms → {removed[1]}ms", "WARN")
 
     # ── ASSEMBLY ──────────────────────────────────────────────────────────────
 
@@ -1208,20 +1435,21 @@ class VibeSlicer(QMainWindow):
     def _on_assemble_progress(self, p, msg):
         self._progress.setValue(int(p * 100))
         self._progress_lbl.setText(msg)
-        self._statusbar.showMessage(msg)
+        self._dbg(f"[Assemblage {int(p*100)}%] {msg}")
 
     def _on_assemble_done(self, raw_cut_path):
         self._raw_cut_path = raw_cut_path
         self._progress.setValue(100)
         self._progress_lbl.setText("Montage brut sauvegardé !")
-        self._statusbar.showMessage(f"✅ Raw_Cut sauvegardé → lancement de la transcription...")
+        self._dbg(f"Assemblage OK → {raw_cut_path}", "OK")
         self._btn_assemble.setEnabled(True)
         self._right._tabs.setCurrentIndex(1)
         self._start_transcription()
 
     def _on_assemble_error(self, err):
         self._btn_assemble.setEnabled(True)
-        self._statusbar.showMessage(f"❌ Erreur assemblage : {err}")
+        self._dbg(f"Erreur assemblage : {err}", "ERROR")
+        self._statusbar.showMessage(f"❌ {err}")
 
     # ── TRANSCRIPTION ─────────────────────────────────────────────────────────
 
@@ -1238,20 +1466,20 @@ class VibeSlicer(QMainWindow):
     def _on_transcribe_progress(self, p, msg):
         self._progress.setValue(int(p * 100))
         self._progress_lbl.setText(msg)
-        self._statusbar.showMessage(f"Transcription : {msg}")
+        self._dbg(f"[Transcription {int(p*100)}%] {msg}")
 
     def _on_transcribe_done(self, words_data, txt_path):
         self._txt_path = txt_path
         self._right.load_subs(txt_path)
         self._progress.setValue(100)
         self._progress_lbl.setText(f"{len(words_data)} mots transcrits")
+        self._dbg(f"Transcription OK — {len(words_data)} mots → {txt_path}", "OK")
         self._statusbar.showMessage(
-            f"✅ Transcription terminée — {len(words_data)} mots. "
-            "Éditez les sous-titres si besoin puis cliquez BRÛLER."
-        )
+            f"✅ {len(words_data)} mots transcrits. Éditez si besoin puis BRÛLER.")
 
     def _on_transcribe_error(self, err):
-        self._statusbar.showMessage(f"❌ Erreur transcription : {err}")
+        self._dbg(f"Erreur transcription : {err}", "ERROR")
+        self._statusbar.showMessage(f"❌ {err}")
         self._progress_lbl.setText("Erreur transcription")
 
     # ── EXPORT ────────────────────────────────────────────────────────────────
@@ -1283,15 +1511,17 @@ class VibeSlicer(QMainWindow):
 
     def _on_export_progress(self, p, msg):
         self._right.set_export_progress(p, msg)
-        self._statusbar.showMessage(f"Export : {msg}")
+        self._dbg(f"[Export {int(p*100)}%] {msg}")
 
     def _on_export_done(self, out_path):
         self._right.set_export_done(out_path)
+        self._dbg(f"Export OK → {out_path}", "OK")
         self._statusbar.showMessage(f"✅ Vidéo finale prête : {out_path}")
 
     def _on_export_error(self, err):
         self._right.set_export_error(err)
-        self._statusbar.showMessage(f"❌ Erreur export : {err}")
+        self._dbg(f"Erreur export : {err}", "ERROR")
+        self._statusbar.showMessage(f"❌ {err}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
