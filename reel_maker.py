@@ -39,7 +39,8 @@ from dotenv import load_dotenv
 from colorama import init, Fore, Style
 import moviepy.editor as mp
 from pydub import AudioSegment, silence
-from faster_whisper import WhisperModel
+# NOTE: faster_whisper (and torch) are imported lazily inside transcribe()
+# to avoid DLL loading issues at startup when CUDA is not available.
 
 init(autoreset=True)
 load_dotenv()
@@ -258,6 +259,7 @@ def transcribe(cut_clip, progress_callback=None):
 
     def run_transcription_safe(device_type, compute_type):
         _progress(0.3, f"Transcription sur {device_type}...")
+        from faster_whisper import WhisperModel  # lazy import — torch DLLs loaded only here
         model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=device_type, compute_type=compute_type)
         segs, _ = model.transcribe(temp_audio, word_timestamps=True)
         return list(segs)

@@ -1319,24 +1319,42 @@ if __name__ == "__main__":
 
     sys.excepthook = _global_exception_hook
 
-    # Vérifier que reel_maker est importable (dépendances lourdes : moviepy, pydub…)
+    # Vérifier que reel_maker est importable (moviepy, pydub — pas torch, chargé lazily)
     try:
-        import reel_maker  # noqa: F401 — on veut juste tester l'import
+        import reel_maker  # noqa: F401 — teste moviepy + pydub seulement (faster_whisper est lazy)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
+        # Erreur sur torch/CUDA = non bloquante : l'app peut tourner sans transcription
+        err_str = str(e)
+        is_torch_dll = "WinError 1114" in err_str or "c10.dll" in err_str or "torch" in err_str.lower()
         box = QMessageBox()
-        box.setWindowTitle("VibeSlicer — Dépendances manquantes")
-        box.setIcon(QMessageBox.Icon.Critical)
-        box.setText(
-            "<b>Impossible de charger le moteur de traitement vidéo.</b><br><br>"
-            "Vérifiez que toutes les dépendances sont installées (moviepy, pydub, "
-            "faster-whisper, ffmpeg…) en relançant le .bat.<br><br>"
-            f"<b>Erreur :</b> {e}"
-        )
-        box.setDetailedText(tb)
-        box.exec()
-        sys.exit(1)
+        box.setWindowTitle("VibeSlicer — Avertissement dépendances")
+        if is_torch_dll:
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(
+                "<b>Avertissement : CUDA / PyTorch non disponible.</b><br><br>"
+                "La transcription Whisper nécessite PyTorch avec les bons drivers GPU ou CPU.<br>"
+                "Les fonctions <b>Analyse</b> et <b>Assemblage</b> fonctionneront normalement.<br>"
+                "La <b>Transcription</b> échouera si vous l'utilisez sans résoudre ce problème.<br><br>"
+                "<b>Solution :</b> réinstaller PyTorch CPU-only :<br>"
+                "<code>pip install torch --index-url https://download.pytorch.org/whl/cpu</code><br><br>"
+                f"<i>Erreur : {e}</i>"
+            )
+            box.setDetailedText(tb)
+            box.exec()
+            # Continue — don't exit, basic features still work
+        else:
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setText(
+                "<b>Impossible de charger le moteur de traitement vidéo.</b><br><br>"
+                "Vérifiez que toutes les dépendances sont installées (moviepy, pydub, ffmpeg…) "
+                "en relançant le .bat.<br><br>"
+                f"<b>Erreur :</b> {e}"
+            )
+            box.setDetailedText(tb)
+            box.exec()
+            sys.exit(1)
 
     win = VibeSlicer()
     win.show()
