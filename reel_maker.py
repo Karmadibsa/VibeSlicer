@@ -187,7 +187,8 @@ def extract_and_detect_silences(video_path, silence_thresh=None, min_silence_len
         silence_thresh=thresh
     )
     _progress(1.0, f"{len(silences)} silence(s) détecté(s).")
-    return video, silences
+    # Return working_path so the caller can pass the CFR file to AssemblyWorker
+    return video, silences, working_path
 
 
 def assemble_clips(video, silences, decisions, progress_callback=None):
@@ -285,15 +286,24 @@ def transcribe(cut_clip, progress_callback=None):
         segs, _ = model.transcribe(temp_audio, word_timestamps=True)
         return list(segs)
 
+    def _is_dll_error(e):
+        s = str(e)
+        return "WinError 1114" in s or "c10.dll" in s or "DLL" in s
+
     try:
         segments_list = run_transcription_safe(CONFIG["DEVICE"], CONFIG["COMPUTE_TYPE"])
-    except:
-        import traceback
-        traceback.print_exc()
+    except Exception as gpu_e:
         _progress(0.5, "GPU échoué — bascule sur CPU...")
         try:
             segments_list = run_transcription_safe("cpu", "int8")
         except Exception as cpu_e:
+            if _is_dll_error(cpu_e) or _is_dll_error(gpu_e):
+                raise RuntimeError(
+                    "PyTorch ne peut pas charger ses DLLs (c10.dll).\n\n"
+                    "➡ Solution : réinstaller PyTorch CPU-only :\n"
+                    "pip install torch --index-url https://download.pytorch.org/whl/cpu\n\n"
+                    "Relancez le .bat après l'installation."
+                ) from None
             raise cpu_e
 
     words_data = []

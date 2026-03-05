@@ -164,7 +164,7 @@ def btn(text, color="#8A2BE2", min_w=120):
 
 class AnalysisWorker(QThread):
     progress = pyqtSignal(float, str)
-    finished = pyqtSignal(object, list, object, object)  # video, silences, waveform_data, audio
+    finished = pyqtSignal(object, list, object, object, str)  # video, silences, waveform, audio, working_path
     error    = pyqtSignal(str)
 
     def __init__(self, video_path, thresh, min_len):
@@ -177,7 +177,7 @@ class AnalysisWorker(QThread):
         try:
             import reel_maker as rm
             from pydub import AudioSegment
-            video, silences = rm.extract_and_detect_silences(
+            video, silences, working_path = rm.extract_and_detect_silences(
                 self.video_path,
                 silence_thresh=self.thresh,
                 min_silence_len=self.min_len,
@@ -200,7 +200,7 @@ class AnalysisWorker(QThread):
             if samples.max() > 0:
                 samples = samples / samples.max()
             self.progress.emit(1.0, f"{len(silences)} silence(s) détecté(s).")
-            self.finished.emit(video, silences, samples, audio)
+            self.finished.emit(video, silences, samples, audio, working_path)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -289,8 +289,9 @@ class ExportWorker(QThread):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TimelineWidget(QWidget):
-    seek_requested = pyqtSignal(float)   # seconds
-    silence_toggled = pyqtSignal(int)    # index in silences list
+    seek_requested  = pyqtSignal(float)        # seconds
+    silence_toggled = pyqtSignal(int)          # index in silences list
+    zone_selected   = pyqtSignal(float, float) # start_ms, end_ms — drag to cut
 
     RULER_H   = 22
     WAVE_H    = 60
@@ -312,6 +313,9 @@ class TimelineWidget(QWidget):
         self._scroll_px   = 0       # horizontal scroll offset in pixels
         self.in_ms        = None    # manual In point
         self.out_ms       = None    # manual Out point
+        # Drag-to-select state
+        self._drag_origin = None    # px where drag started
+        self._drag_end    = None    # px current drag position
 
     def load(self, duration_ms, silences, decisions, waveform):
         self.duration_ms = duration_ms
@@ -431,6 +435,23 @@ class TimelineWidget(QWidget):
                     p.setPen(QPen(border))
                     p.drawText(r, Qt.AlignmentFlag.AlignCenter, label)
 
+        # ── DRAG SELECTION (while user is dragging) ───────────────────────────
+        if self._drag_origin is not None and self._drag_end is not None:
+            dx1 = int(min(self._drag_origin, self._drag_end))
+            dx2 = int(max(self._drag_origin, self._drag_end))
+            if dx2 - dx1 > 6:
+                drag_rect = QRect(dx1, wave_y, dx2 - dx1, self.WAVE_H + self.SEG_H + 4)
+                p.fillRect(drag_rect, QColor(239, 68, 68, 55))   # semi-transparent red
+                p.setPen(QPen(QColor("#ef4444"), 2))
+                p.drawLine(dx1, ruler_y + 4, dx1, seg_y + self.SEG_H)
+                p.drawLine(dx2, ruler_y + 4, dx2, seg_y + self.SEG_H)
+                dur_ms = abs(self._px_to_ms(dx2) - self._px_to_ms(dx1))
+                p.setFont(QFont("Segoe UI", 9))
+                p.setPen(QPen(QColor("#ffffff")))
+                mid_x = (dx1 + dx2) // 2
+                lbl = f"✂ {dur_ms/1000:.1f}s"
+                p.drawText(mid_x - 24, wave_y + self.WAVE_H // 2 + 4, lbl)
+
         # ── IN/OUT SELECTION ─────────────────────────────────────────────────
         if self.in_ms is not None and self.out_ms is not None and self.in_ms < self.out_ms:
             ix1 = self._ms_to_px(self.in_ms)
@@ -472,10 +493,42 @@ class TimelineWidget(QWidget):
             px = event.position().x()
             idx = self._silence_at(px)
             if idx >= 0:
+                # Click on a silence block → toggle cut/keep instantly
                 self.silence_toggled.emit(idx)
             else:
-                ms = max(0.0, self._px_to_ms(px))
-                self.seek_requested.emit(ms / 1000.0)
+                # Start a drag (might become zone selection or just a seek click)
+                self._drag_origin = px
+                self._drag_end    = px
+
+    def mouseMoveEvent(self, event):
+        if self._drag_origin is not None:
+            self._drag_end = event.position().x()
+            self.update()
+            # Change cursor when dragging to signal "cutting" mode
+            drag_px = abs(self._drag_end - self._drag_origin)
+            if drag_px > 12:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton or self._drag_origin is None:
+            return
+        drag_px = abs(self._drag_end - self._drag_origin)
+        if drag_px < 12:
+            # Small movement → treat as a simple seek click
+            ms = max(0.0, self._px_to_ms(self._drag_origin))
+            self.seek_requested.emit(ms / 1000.0)
+        else:
+            # Significant drag → create a cut zone
+            x1 = min(self._drag_origin, self._drag_end)
+            x2 = max(self._drag_origin, self._drag_end)
+            ms1 = max(0.0, self._px_to_ms(x1))
+            ms2 = min(float(self.duration_ms), self._px_to_ms(x2))
+            if ms2 - ms1 > 200:   # at least 200ms to avoid accidental tiny zones
+                self.zone_selected.emit(ms1, ms2)
+        self._drag_origin = None
+        self._drag_end    = None
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.update()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -973,7 +1026,8 @@ class VibeSlicer(QMainWindow):
         self.resize(1280, 780)
 
         # State
-        self._video_path    = None
+        self._video_path    = None   # original file chosen by user
+        self._working_path  = None   # CFR-normalized file used for analysis/assembly
         self._video_obj     = None
         self._silences      = []
         self._raw_cut_path  = None
@@ -1038,7 +1092,7 @@ class VibeSlicer(QMainWindow):
         tl_v.setSpacing(2)
 
         tl_header = QHBoxLayout()
-        tl_lbl = QLabel("TIMELINE  —  clic silence = couper/garder  |  scroll = zoom")
+        tl_lbl = QLabel("TIMELINE  —  🖱 glisser = marquer zone à couper  |  clic silence = couper/garder  |  scroll = zoom")
         tl_lbl.setStyleSheet("color: #6b6890; font-size: 11px;")
         tl_header.addWidget(tl_lbl)
         tl_header.addStretch()
@@ -1080,6 +1134,7 @@ class VibeSlicer(QMainWindow):
         self._timeline = TimelineWidget()
         self._timeline.seek_requested.connect(self._on_timeline_seek)
         self._timeline.silence_toggled.connect(self._on_silence_toggled)
+        self._timeline.zone_selected.connect(self._on_zone_selected)
         tl_v.addWidget(self._timeline)
         main_v.addWidget(timeline_frame)
 
@@ -1225,11 +1280,12 @@ class VibeSlicer(QMainWindow):
         self._progress_lbl.setText(msg)
         self._dbg(f"[Analyse {int(p*100)}%] {msg}")
 
-    def _on_analysis_done(self, video, silences, waveform, audio):
+    def _on_analysis_done(self, video, silences, waveform, audio, working_path):
         self._dbg(f"Analyse terminée — {len(silences)} silence(s)", "OK")
-        self._video_obj  = video
-        self._silences   = silences
-        self._audio_obj  = audio
+        self._video_obj    = video
+        self._working_path = working_path  # CFR path — use for assembly
+        self._silences     = silences
+        self._audio_obj    = audio
         decisions = [True] * len(silences)
 
         # Update player — pass video_path so audio playback works
@@ -1308,34 +1364,43 @@ class VibeSlicer(QMainWindow):
     def _update_inout_btn(self):
         ok = (self._in_ms is not None and self._out_ms is not None
               and self._in_ms < self._out_ms
-              and bool(self._silences))
+              and self._video_obj is not None)
         self._btn_add.setEnabled(ok)
 
     def _on_add_manual_zone(self):
         if self._in_ms is None or self._out_ms is None or self._in_ms >= self._out_ms:
             return
-        if not self._silences:
+        if self._video_obj is None:
             return
-        new_zone = (self._in_ms, self._out_ms)
-        old_decisions = self._right.decisions
-        # Insert in sorted order
+        self._add_zone(self._in_ms, self._out_ms)
+        # Reset In/Out markers
+        self._in_ms  = None
+        self._out_ms = None
+        self._timeline.set_in_out(None, None)
+        self._btn_add.setEnabled(False)
+
+    def _on_zone_selected(self, ms1, ms2):
+        """Called when user drags on the timeline — auto-adds as a cut zone."""
+        if self._video_obj is None:
+            self._dbg("Analysez d'abord la vidéo avant d'ajouter des zones.", "WARN")
+            return
+        self._add_zone(ms1, ms2)
+
+    def _add_zone(self, ms1, ms2):
+        """Insert a cut zone (ms1 → ms2) into the silences list."""
+        new_zone = (int(ms1), int(ms2))
+        old_decisions = self._right.decisions if self._silences else []
         self._silences.append(new_zone)
         self._silences.sort(key=lambda x: x[0])
         idx = self._silences.index(new_zone)
-        old_decisions.insert(idx, True)  # default: cut the new zone
-        # Reload UI
+        old_decisions.insert(idx, True)  # default: cut
         self._right.load_silences(self._silences, old_decisions)
         self._timeline.load(
             int(self._video_obj.duration * 1000),
             self._silences, old_decisions, self._timeline.waveform
         )
-        # Reset In/Out
-        self._in_ms  = None
-        self._out_ms = None
-        self._timeline.set_in_out(None, None)
-        self._btn_add.setEnabled(False)
         dur = new_zone[1] - new_zone[0]
-        self._dbg(f"Zone manuelle ajoutée : {new_zone[0]}ms → {new_zone[1]}ms ({dur}ms)", "OK")
+        self._dbg(f"Zone ✂ ajoutée : {new_zone[0]}ms → {new_zone[1]}ms  ({dur/1000:.1f}s)", "OK")
 
     def _on_delete_selected_zone(self):
         """Remove the silence zone selected in the right-panel list."""
@@ -1371,8 +1436,10 @@ class VibeSlicer(QMainWindow):
             os.path.join(rm.CONFIG["OUTPUT_DIR"], f"Reel_Ready_{name_root}.mp4")
         )
 
+        # Use working_path (CFR-normalized) so timestamps match the analyzed file
         self._worker_assembly = AssemblyWorker(
-            self._video_path, self._silences, decisions, self._raw_cut_path
+            self._working_path or self._video_path,
+            self._silences, decisions, self._raw_cut_path
         )
         self._worker_assembly.progress.connect(self._on_assemble_progress)
         self._worker_assembly.finished.connect(self._on_assemble_done)
