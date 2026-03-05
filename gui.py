@@ -289,9 +289,10 @@ class ExportWorker(QThread):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TimelineWidget(QWidget):
-    seek_requested  = pyqtSignal(float)        # seconds
-    silence_toggled = pyqtSignal(int)          # index in silences list
-    zone_selected   = pyqtSignal(float, float) # start_ms, end_ms — drag to cut
+    seek_requested         = pyqtSignal(float)  # seconds — click on ruler
+    segment_toggled        = pyqtSignal(int)    # segment index clicked (toggle keep/cut)
+    cut_placed             = pyqtSignal(float)  # ms — razor cut placed here
+    cut_mode_exit_requested = pyqtSignal()      # Escape pressed in cut mode
 
     RULER_H   = 22
     WAVE_H    = 60
@@ -302,43 +303,87 @@ class TimelineWidget(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(self.TOTAL_H)
         self.setMaximumHeight(self.TOTAL_H + 10)
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
         self.duration_ms  = 0
-        self.silences     = []      # [(start_ms, end_ms), ...]
-        self.decisions    = []      # [True/False, ...]
         self.waveform     = None    # numpy array normalised 0-1
         self.playhead_ms  = 0
         self._zoom        = 1.0     # pixels per ms
         self._scroll_px   = 0       # horizontal scroll offset in pixels
         self.in_ms        = None    # manual In point
         self.out_ms       = None    # manual Out point
-        # Cut Tool state
-        self._cut_mode     = False  # True = cut tool active
-        self._cut_start_ms = None   # first click position (pending second click)
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # allow Escape key
+        # Segment model: boundaries divide video into independently toggleable segments
+        self._boundaries  = []      # sorted ms positions [0, ..., duration_ms]
+        self._seg_keep    = []      # True=keep  False=cut  (one per interval)
+        # Cut Tool
+        self._cut_mode    = False
 
     def load(self, duration_ms, silences, decisions, waveform):
+        """Load from silence-list model — converts internally to segment model."""
         self.duration_ms = duration_ms
-        self.silences    = silences
-        self.decisions   = decisions[:]
         self.waveform    = waveform
-        self._zoom       = max(0.05, (self.width() - 20) / max(duration_ms, 1))
+        self._init_segments(silences, decisions, duration_ms)
+        self._zoom = max(0.05, (self.width() - 20) / max(duration_ms, 1))
         self.update()
+
+    def _init_segments(self, silences, decisions, duration_ms):
+        """Convert silence list into boundary/segment model."""
+        bset = {0, int(duration_ms)}
+        for s, e in silences:
+            bset.add(int(s)); bset.add(int(e))
+        self._boundaries = sorted(bset)
+        self._seg_keep = []
+        for i in range(len(self._boundaries) - 1):
+            ss, se = self._boundaries[i], self._boundaries[i + 1]
+            keep = True
+            for j, (s, e) in enumerate(silences):
+                if ss >= s and se <= e:
+                    keep = not (decisions[j] if j < len(decisions) else True)
+                    break
+            self._seg_keep.append(keep)
 
     def set_playhead(self, ms):
         self.playhead_ms = ms
         self.update()
 
-    def set_decision(self, idx, cut: bool):
-        if 0 <= idx < len(self.decisions):
-            self.decisions[idx] = cut
-            self.update()
-
     def set_in_out(self, in_ms, out_ms):
         self.in_ms  = in_ms
         self.out_ms = out_ms
         self.update()
+
+    # ── Segment model helpers ─────────────────────────────────────────────────
+
+    def toggle_segment(self, idx):
+        if 0 <= idx < len(self._seg_keep):
+            self._seg_keep[idx] = not self._seg_keep[idx]
+            self.update()
+
+    def set_segment_keep(self, idx, keep: bool):
+        if 0 <= idx < len(self._seg_keep):
+            self._seg_keep[idx] = keep
+            self.update()
+
+    def add_boundary_at(self, ms):
+        """Razor-cut: split the segment at ms. Both halves inherit parent decision."""
+        ms = int(round(ms))
+        if ms in self._boundaries:
+            return
+        for i in range(len(self._boundaries) - 1):
+            if self._boundaries[i] < ms < self._boundaries[i + 1]:
+                keep = self._seg_keep[i]
+                self._boundaries.insert(i + 1, ms)
+                self._seg_keep.insert(i + 1, keep)
+                self.update()
+                return
+
+    def set_cut_mode(self, enabled: bool):
+        self._cut_mode = enabled
+        self.setCursor(Qt.CursorShape.SplitHCursor if enabled
+                       else Qt.CursorShape.PointingHandCursor)
+        self.update()
+
+    # ── Coordinate helpers ────────────────────────────────────────────────────
 
     def _ms_to_px(self, ms):
         return int(ms * self._zoom) - self._scroll_px + 10
@@ -346,11 +391,11 @@ class TimelineWidget(QWidget):
     def _px_to_ms(self, px):
         return (px + self._scroll_px - 10) / max(self._zoom, 0.001)
 
-    def _silence_at(self, px):
-        """Return index of silence block at pixel x, or -1."""
+    def _segment_at(self, px):
+        """Return segment index at pixel x, or -1."""
         ms = self._px_to_ms(px)
-        for i, (s, e) in enumerate(self.silences):
-            if s <= ms <= e:
+        for i in range(len(self._boundaries) - 1):
+            if self._boundaries[i] <= ms <= self._boundaries[i + 1]:
                 return i
         return -1
 
@@ -405,29 +450,17 @@ class TimelineWidget(QWidget):
                 amp_h = int(amp * (self.WAVE_H // 2 - 2))
                 p.drawLine(x, mid_y - amp_h, x, mid_y + amp_h)
 
-        # ── SEGMENTS ─────────────────────────────────────────────────────────
+        # ── SEGMENTS (all toggleable: green=keep, red=cut) ───────────────────
         p.fillRect(0, seg_y, w, self.SEG_H, C_BG)
-        if self.silences:
-            # Draw content segments (green)
-            boundaries = [0] + [ms for pair in self.silences for ms in pair] + [self.duration_ms]
-            for i in range(0, len(boundaries) - 1, 2):
-                s, e = boundaries[i], boundaries[i + 1]
-                x1 = self._ms_to_px(s)
-                x2 = self._ms_to_px(e)
-                r = QRect(x1, seg_y + 1, max(x2 - x1, 2), self.SEG_H - 2)
-                p.fillRect(r, QColor("#1e3a2a"))
-                p.setPen(QPen(C_GREEN, 1))
-                p.drawRect(r)
-
-            # Draw silence blocks
+        if self._boundaries:
             p.setFont(QFont("Segoe UI", 8))
-            for i, (s, e) in enumerate(self.silences):
-                x1 = self._ms_to_px(s)
-                x2 = self._ms_to_px(e)
-                cut = self.decisions[i] if i < len(self.decisions) else True
-                color = QColor("#3b0a0a") if cut else QColor("#0a2c1a")
-                border = C_RED if cut else C_GREEN
-                label  = "✂" if cut else "○"
+            for i in range(len(self._boundaries) - 1):
+                x1 = self._ms_to_px(self._boundaries[i])
+                x2 = self._ms_to_px(self._boundaries[i + 1])
+                keep   = self._seg_keep[i] if i < len(self._seg_keep) else True
+                color  = QColor("#1e3a2a") if keep else QColor("#3b0a0a")
+                border = C_GREEN if keep else C_RED
+                label  = "○" if keep else "✂"
                 r = QRect(x1, seg_y + 1, max(x2 - x1, 4), self.SEG_H - 2)
                 p.fillRect(r, color)
                 p.setPen(QPen(border, 1))
@@ -435,29 +468,20 @@ class TimelineWidget(QWidget):
                 if x2 - x1 > 18:
                     p.setPen(QPen(border))
                     p.drawText(r, Qt.AlignmentFlag.AlignCenter, label)
-
-        # ── CUT TOOL — pending first marker ───────────────────────────────────
-        if self._cut_mode and self._cut_start_ms is not None:
-            cx = self._ms_to_px(self._cut_start_ms)
-            if 0 <= cx <= w:
-                # Highlight region from start marker to current wave area
-                p.fillRect(QRect(cx, wave_y, w - cx, self.WAVE_H + self.SEG_H + 4),
-                           QColor(249, 115, 22, 30))   # semi-transparent orange
-                p.setPen(QPen(QColor("#f97316"), 2, Qt.PenStyle.DashLine))
-                p.drawLine(cx, ruler_y, cx, seg_y + self.SEG_H)
-                p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-                p.setPen(QPen(QColor("#f97316")))
-                p.drawText(cx + 3, ruler_y + 12, "✂ début")
+            # Razor cut markers (boundaries that aren't 0 or duration)
+            p.setPen(QPen(C_FG2, 1))
+            for ms in self._boundaries[1:-1]:
+                bx = self._ms_to_px(ms)
+                if 0 <= bx <= w:
+                    p.drawLine(bx, seg_y, bx, seg_y + self.SEG_H)
 
         # ── CUT MODE INDICATOR ────────────────────────────────────────────────
         if self._cut_mode:
             p.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
             p.setPen(QPen(QColor("#f97316")))
-            hint = ("✂  MODE COUPE  —  clic 2 : fin de zone  |  clic droit : annuler"
-                    if self._cut_start_ms is not None else
-                    "✂  MODE COUPE  —  clic 1 : début de zone  |  Échap : désactiver")
             p.drawText(QRect(0, wave_y + 2, w - 4, 18),
-                       Qt.AlignmentFlag.AlignRight, hint)
+                       Qt.AlignmentFlag.AlignRight,
+                       "✂  MODE COUPE  —  clic = couper ici  |  Échap : désactiver")
 
         # ── IN/OUT SELECTION ─────────────────────────────────────────────────
         if self.in_ms is not None and self.out_ms is not None and self.in_ms < self.out_ms:
@@ -496,73 +520,41 @@ class TimelineWidget(QWidget):
         p.end()
 
     def mousePressEvent(self, event):
-        px = event.position().x()
-
-        # Right-click in cut mode → cancel pending marker
-        if event.button() == Qt.MouseButton.RightButton and self._cut_mode:
-            self._cut_start_ms = None
-            self.update()
-            return
-
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        px = event.position().x()
+        py = event.position().y()
 
         if self._cut_mode:
-            # ── CUT TOOL MODE ─────────────────────────────────────────────────
-            idx = self._silence_at(px)
-            if idx >= 0:
-                # Click on existing zone → toggle keep/cut
-                self.silence_toggled.emit(idx)
-            elif self._cut_start_ms is None:
-                # First click → mark start of cut zone
-                self._cut_start_ms = max(0.0, self._px_to_ms(px))
-                self.update()
-            else:
-                # Second click → complete the zone
-                ms2 = min(float(self.duration_ms), self._px_to_ms(px))
-                ms1 = self._cut_start_ms
-                self._cut_start_ms = None
-                if abs(ms2 - ms1) > 200:
-                    self.zone_selected.emit(min(ms1, ms2), max(ms1, ms2))
-                self.update()
+            # ── CUT TOOL (razor) ──────────────────────────────────────────────
+            # Single click = place a razor cut at this position
+            ms = max(0.0, min(float(self.duration_ms), self._px_to_ms(px)))
+            self.cut_placed.emit(ms)
         else:
             # ── NORMAL MODE ───────────────────────────────────────────────────
-            idx = self._silence_at(px)
-            if idx >= 0:
-                # Click on silence → toggle
-                self.silence_toggled.emit(idx)
-            else:
-                # Click on empty area → seek
+            if py <= self.RULER_H:
+                # Click on ruler → seek
                 ms = max(0.0, self._px_to_ms(px))
                 self.seek_requested.emit(ms / 1000.0)
+            else:
+                # Click on segment area → toggle keep/cut
+                idx = self._segment_at(px)
+                if idx >= 0:
+                    self.segment_toggled.emit(idx)
+                else:
+                    ms = max(0.0, self._px_to_ms(px))
+                    self.seek_requested.emit(ms / 1000.0)
 
     def mouseMoveEvent(self, event):
-        # Update cursor style based on mode and state
-        if self._cut_mode:
-            if self._cut_start_ms is not None:
-                self.setCursor(Qt.CursorShape.CrossCursor)
-            else:
-                self.setCursor(Qt.CursorShape.SplitHCursor)
-        else:
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.SplitHCursor if self._cut_mode
+                       else Qt.CursorShape.PointingHandCursor)
 
     def mouseReleaseEvent(self, event):
-        pass  # All actions handled in mousePressEvent
-
-    def set_cut_mode(self, enabled: bool):
-        """Activate / deactivate the Cut Tool."""
-        self._cut_mode     = enabled
-        self._cut_start_ms = None   # reset any pending marker
-        if enabled:
-            self.setCursor(Qt.CursorShape.SplitHCursor)
-        else:
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update()
+        pass
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and self._cut_mode:
-            self._cut_start_ms = None
-            self.update()
+            self.cut_mode_exit_requested.emit()
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):
@@ -1064,7 +1056,6 @@ class VibeSlicer(QMainWindow):
         self._video_path    = None   # original file chosen by user
         self._working_path  = None   # CFR-normalized file used for analysis/assembly
         self._video_obj     = None
-        self._silences      = []
         self._raw_cut_path  = None
         self._txt_path      = None
         self._audio_obj     = None
@@ -1110,7 +1101,7 @@ class VibeSlicer(QMainWindow):
         self._right.decision_changed.connect(self._on_decision_changed)
         self._right._btn_export.clicked.connect(self._start_export)
         self._right._silence_list.currentRowChanged.connect(
-            lambda row: self._btn_del_zone.setEnabled(row >= 0 and bool(self._silences))
+            lambda row: self._btn_del_zone.setEnabled(row >= 0 and self._timeline.duration_ms > 0)
         )
         top_split.addWidget(self._right)
 
@@ -1127,7 +1118,7 @@ class VibeSlicer(QMainWindow):
         tl_v.setSpacing(2)
 
         tl_header = QHBoxLayout()
-        tl_lbl = QLabel("TIMELINE  —  scroll = zoom  |  clic silence = couper/garder  |  Mode Coupe : clic×2 pour zone manuelle")
+        tl_lbl = QLabel("TIMELINE  —  scroll = zoom  |  clic segment = couper/garder  |  Mode Coupe : clic = razor cut")
         tl_lbl.setStyleSheet("color: #6b6890; font-size: 11px;")
         tl_header.addWidget(tl_lbl)
         tl_header.addStretch()
@@ -1196,8 +1187,11 @@ class VibeSlicer(QMainWindow):
 
         self._timeline = TimelineWidget()
         self._timeline.seek_requested.connect(self._on_timeline_seek)
-        self._timeline.silence_toggled.connect(self._on_silence_toggled)
-        self._timeline.zone_selected.connect(self._on_zone_selected)
+        self._timeline.segment_toggled.connect(self._on_segment_toggled)
+        self._timeline.cut_placed.connect(self._on_cut_placed)
+        self._timeline.cut_mode_exit_requested.connect(
+            lambda: self._btn_cut_mode.setChecked(False)
+        )
         tl_v.addWidget(self._timeline)
         main_v.addWidget(timeline_frame)
 
@@ -1346,33 +1340,41 @@ class VibeSlicer(QMainWindow):
     def _on_analysis_done(self, video, silences, waveform, audio, working_path):
         self._dbg(f"Analyse terminée — {len(silences)} silence(s)", "OK")
         self._video_obj    = video
-        self._working_path = working_path  # CFR path — use for assembly
-        self._silences     = silences
+        self._working_path = working_path
         self._audio_obj    = audio
         decisions = [True] * len(silences)
 
-        # Update player — pass video_path so audio playback works
         self._player.load(video, self._video_path)
-
-        # Update timeline
-        self._timeline.load(
-            int(video.duration * 1000),
-            silences,
-            decisions,
-            waveform
-        )
-
-        # Update right panel
-        self._right.load_silences(silences, decisions)
+        self._timeline.load(int(video.duration * 1000), silences, decisions, waveform)
+        self._sync_right_panel()
 
         self._btn_analyse.setEnabled(True)
         self._btn_assemble.setEnabled(True)
         self._progress.setValue(100)
-        self._progress_lbl.setText(f"{len(silences)} silence(s) trouvé(s)")
+        n_cut = sum(1 for k in self._timeline._seg_keep if not k)
+        self._progress_lbl.setText(f"{n_cut} segment(s) à couper")
         self._statusbar.showMessage(
             f"Analyse terminée — {len(silences)} silence(s) détecté(s). "
-            "Cliquez sur la timeline ou la liste pour couper/garder."
+            "Cliquez sur un segment pour couper/garder. Mode Coupe = razor cuts manuels."
         )
+
+    # ── Segment model helpers (VibeSlicer level) ──────────────────────────────
+
+    def _get_assembly_data(self):
+        """Derive silences + decisions from the timeline's segment model for assembly."""
+        silences, decisions = [], []
+        b = self._timeline._boundaries
+        sk = self._timeline._seg_keep
+        for i in range(len(b) - 1):
+            if not sk[i]:   # cut segment
+                silences.append((b[i], b[i + 1]))
+                decisions.append(True)
+        return silences, decisions
+
+    def _sync_right_panel(self):
+        """Refresh right-panel silence list from current segment model."""
+        silences, decisions = self._get_assembly_data()
+        self._right.load_silences(silences, decisions)
 
     def _on_analysis_error(self, err):
         self._btn_analyse.setEnabled(True)
@@ -1381,15 +1383,35 @@ class VibeSlicer(QMainWindow):
         self._dbg(f"Erreur analyse : {err}", "ERROR")
         self._statusbar.showMessage(f"❌ {err}")
 
-    # ── SILENCE INTERACTIONS ──────────────────────────────────────────────────
+    # ── SEGMENT / CUT INTERACTIONS ────────────────────────────────────────────
 
-    def _on_silence_toggled(self, idx):
-        """Timeline clicked on a silence block."""
-        self._right.toggle_silence(idx)
-        # right panel emits decision_changed which calls _on_decision_changed
+    def _on_segment_toggled(self, idx):
+        """Timeline: user clicked on a segment to toggle keep/cut."""
+        self._timeline.toggle_segment(idx)
+        self._sync_right_panel()
+        if 0 <= idx < len(self._timeline._boundaries) - 1:
+            s = self._timeline._boundaries[idx]
+            e = self._timeline._boundaries[idx + 1]
+            keep = self._timeline._seg_keep[idx]
+            self._dbg(f"Segment {s}ms→{e}ms : {'○ gardé' if keep else '✂ coupé'}", "DEBUG")
 
-    def _on_decision_changed(self, idx, cut):
-        self._timeline.set_decision(idx, cut)
+    def _on_cut_placed(self, ms):
+        """Cut Tool: user clicked to place a razor cut at ms."""
+        if self._timeline.duration_ms == 0:
+            self._dbg("Analysez d'abord la vidéo.", "WARN")
+            return
+        self._timeline.add_boundary_at(ms)
+        self._sync_right_panel()
+        self._dbg(f"Coupe razor : {ms:.0f}ms", "OK")
+
+    def _on_decision_changed(self, panel_idx, cut):
+        """Right-panel list: user changed a cut zone's decision."""
+        # panel shows only cut segments → find corresponding segment index
+        cut_idxs = [i for i, k in enumerate(self._timeline._seg_keep) if not k]
+        if 0 <= panel_idx < len(cut_idxs):
+            seg_idx = cut_idxs[panel_idx]
+            self._timeline.set_segment_keep(seg_idx, not cut)
+            self._sync_right_panel()
 
     # ── PLAYER / TIMELINE SYNC ────────────────────────────────────────────────
 
@@ -1433,68 +1455,47 @@ class VibeSlicer(QMainWindow):
     def _on_add_manual_zone(self):
         if self._in_ms is None or self._out_ms is None or self._in_ms >= self._out_ms:
             return
-        if self._video_obj is None:
+        if self._timeline.duration_ms == 0:
             return
-        self._add_zone(self._in_ms, self._out_ms)
-        # Reset In/Out markers
+        in_ms, out_ms = self._in_ms, self._out_ms
+        # Add boundaries, then mark every segment inside as cut
+        self._timeline.add_boundary_at(in_ms)
+        self._timeline.add_boundary_at(out_ms)
+        b = self._timeline._boundaries
+        for i in range(len(b) - 1):
+            if b[i] >= in_ms and b[i + 1] <= out_ms:
+                self._timeline.set_segment_keep(i, False)
+        self._sync_right_panel()
+        self._dbg(f"Zone manuelle coupée : {in_ms}ms → {out_ms}ms", "OK")
         self._in_ms  = None
         self._out_ms = None
         self._timeline.set_in_out(None, None)
         self._btn_add.setEnabled(False)
 
-    def _on_zone_selected(self, ms1, ms2):
-        """Called when user drags on the timeline — auto-adds as a cut zone."""
-        if self._video_obj is None:
-            self._dbg("Analysez d'abord la vidéo avant d'ajouter des zones.", "WARN")
-            return
-        self._add_zone(ms1, ms2)
-
-    def _add_zone(self, ms1, ms2):
-        """Insert a cut zone (ms1 → ms2) into the silences list."""
-        new_zone = (int(ms1), int(ms2))
-        old_decisions = self._right.decisions if self._silences else []
-        self._silences.append(new_zone)
-        self._silences.sort(key=lambda x: x[0])
-        idx = self._silences.index(new_zone)
-        old_decisions.insert(idx, True)  # default: cut
-        self._right.load_silences(self._silences, old_decisions)
-        self._timeline.load(
-            int(self._video_obj.duration * 1000),
-            self._silences, old_decisions, self._timeline.waveform
-        )
-        dur = new_zone[1] - new_zone[0]
-        self._dbg(f"Zone ✂ ajoutée : {new_zone[0]}ms → {new_zone[1]}ms  ({dur/1000:.1f}s)", "OK")
-
     def _on_delete_selected_zone(self):
-        """Remove the silence zone selected in the right-panel list."""
+        """Restore the cut zone selected in the right-panel list (mark as keep)."""
         idx = self._right._silence_list.currentRow()
-        if idx < 0 or idx >= len(self._silences):
+        if idx < 0:
             return
-        removed = self._silences.pop(idx)
-        old_decisions = self._right.decisions
-        old_decisions.pop(idx)
-        self._right.load_silences(self._silences, old_decisions)
-        self._timeline.load(
-            int(self._video_obj.duration * 1000),
-            self._silences, old_decisions, self._timeline.waveform
-        )
-        self._dbg(f"Zone supprimée : {removed[0]}ms → {removed[1]}ms", "WARN")
+        cut_idxs = [i for i, k in enumerate(self._timeline._seg_keep) if not k]
+        if 0 <= idx < len(cut_idxs):
+            seg_idx = cut_idxs[idx]
+            s = self._timeline._boundaries[seg_idx]
+            e = self._timeline._boundaries[seg_idx + 1]
+            self._timeline.set_segment_keep(seg_idx, True)
+            self._sync_right_panel()
+            self._dbg(f"Zone restaurée (○ gardée) : {s}ms → {e}ms", "WARN")
 
     # ── CUT TOOL TOGGLE ───────────────────────────────────────────────────────
 
     def _on_toggle_cut_mode(self, checked):
         self._timeline.set_cut_mode(checked)
         if checked:
-            self._dbg(
-                "Mode Coupe ON — clic 1 : début de zone | clic 2 : fin | clic droit : annuler",
-                "INFO"
-            )
-            self._statusbar.showMessage(
-                "✂ Mode Coupe actif — Clic 1 : début, Clic 2 : fin de zone | Clic droit / Échap : annuler"
-            )
+            self._dbg("Mode Coupe ON — clic = razor cut | clic segment = couper/garder", "INFO")
+            self._statusbar.showMessage("✂ Mode Coupe : clic sur la timeline = couper ici | Échap : désactiver")
         else:
-            self._dbg("Mode Coupe désactivé — mode normal", "INFO")
-            self._statusbar.showMessage("Mode normal — cliquez sur la timeline pour naviguer")
+            self._dbg("Mode Coupe désactivé", "INFO")
+            self._statusbar.showMessage("Mode normal — clic sur un segment = couper/garder | règle = seek")
 
     # ── ASSEMBLY ──────────────────────────────────────────────────────────────
 
@@ -1506,7 +1507,7 @@ class VibeSlicer(QMainWindow):
         self._progress_lbl.setText("Assemblage en cours...")
         self._statusbar.showMessage("Assemblage de la vidéo coupée...")
 
-        decisions = self._right.decisions
+        silences, decisions = self._get_assembly_data()
         name_root = os.path.splitext(os.path.basename(self._video_path))[0]
 
         import reel_maker as rm
@@ -1518,7 +1519,7 @@ class VibeSlicer(QMainWindow):
         # Use working_path (CFR-normalized) so timestamps match the analyzed file
         self._worker_assembly = AssemblyWorker(
             self._working_path or self._video_path,
-            self._silences, decisions, self._raw_cut_path
+            silences, decisions, self._raw_cut_path
         )
         self._worker_assembly.progress.connect(self._on_assemble_progress)
         self._worker_assembly.finished.connect(self._on_assemble_done)
