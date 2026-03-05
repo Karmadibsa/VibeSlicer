@@ -13,6 +13,33 @@ if os.name == 'nt':
     except AttributeError:
         pass
 
+    # ── Ajouter torch/lib au DLL search path ──────────────────────────────────
+    # ctranslate2 (moteur de faster-whisper) a besoin de c10.dll, torch_cpu.dll
+    # etc. depuis l'installation PyTorch. Windows ne cherche pas automatiquement
+    # dans site-packages, donc on l'ajoute manuellement.
+    try:
+        import site as _site
+        _torch_lib_added = False
+        for _sp in (_site.getsitepackages() or []):
+            _tlib = os.path.join(_sp, "torch", "lib")
+            if os.path.exists(_tlib):
+                os.add_dll_directory(_tlib)
+                print(f"✅ torch/lib DLL path ajouté : {_tlib}")
+                _torch_lib_added = True
+                break
+        if not _torch_lib_added:
+            # Fallback : demander à torch lui-même son chemin
+            try:
+                import torch as _torch
+                _tlib = os.path.join(os.path.dirname(_torch.__file__), "lib")
+                if os.path.exists(_tlib):
+                    os.add_dll_directory(_tlib)
+                    print(f"✅ torch/lib DLL path (fallback) : {_tlib}")
+            except Exception:
+                pass
+    except Exception as _e:
+        print(f"⚠ Impossible d'ajouter torch/lib au DLL path : {_e}")
+
 cuda_path_v13 = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin"
 if os.path.exists(cuda_path_v13):
     try:
@@ -288,23 +315,29 @@ def transcribe(cut_clip, progress_callback=None):
 
     def _is_dll_error(e):
         s = str(e)
-        return "WinError 1114" in s or "c10.dll" in s or "DLL" in s
+        return "WinError 1114" in s or "c10.dll" in s
 
     try:
         segments_list = run_transcription_safe(CONFIG["DEVICE"], CONFIG["COMPUTE_TYPE"])
     except Exception as gpu_e:
-        _progress(0.5, "GPU échoué — bascule sur CPU...")
+        _progress(0.5, f"GPU échoué ({type(gpu_e).__name__}) — bascule sur CPU...")
         try:
             segments_list = run_transcription_safe("cpu", "int8")
         except Exception as cpu_e:
-            if _is_dll_error(cpu_e) or _is_dll_error(gpu_e):
+            # N'afficher l'erreur DLL que si le fallback CPU échoue aussi
+            # (le GPU qui échoue avec DLL est attendu quand torch est CPU-only)
+            if _is_dll_error(cpu_e):
                 raise RuntimeError(
-                    "PyTorch ne peut pas charger ses DLLs (c10.dll).\n\n"
-                    "➡ Solution : réinstaller PyTorch CPU-only :\n"
-                    "pip install torch --index-url https://download.pytorch.org/whl/cpu\n\n"
-                    "Relancez le .bat après l'installation."
+                    "ctranslate2 ne peut pas charger ses DLLs même en mode CPU.\n\n"
+                    "➡ Relancez LANCER_VIBESLICER.bat pour réinstaller les dépendances.\n\n"
+                    f"Erreur GPU  : {gpu_e}\n"
+                    f"Erreur CPU : {cpu_e}"
                 ) from None
-            raise cpu_e
+            # Sinon : afficher l'erreur réelle du CPU pour diagnostic
+            raise RuntimeError(
+                f"Transcription CPU échouée : {cpu_e}\n\n"
+                f"(Erreur GPU initiale : {gpu_e})"
+            ) from cpu_e
 
     words_data = []
     for s in segments_list:
