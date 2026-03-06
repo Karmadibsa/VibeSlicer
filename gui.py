@@ -1640,6 +1640,35 @@ if __name__ == "__main__":
     # Se placer dans le dossier du script (chemins relatifs input/output/assets)
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
+    # ── Ajouter PyQt6/Qt6/bin au PATH pour que le plugin multimedia
+    #    (qwindowsmediafoundation.dll) trouve ses dépendances Qt au démarrage.
+    #    Sans ça, Qt imprime "No QtMultimedia backends found" et le player
+    #    reste en mode fallback. ──────────────────────────────────────────────
+    try:
+        import site as _site
+        _search_dirs = []
+        try:
+            _search_dirs += _site.getsitepackages()
+        except AttributeError:
+            pass
+        try:
+            _search_dirs.append(_site.getusersitepackages())
+        except AttributeError:
+            pass
+        for _sp in _search_dirs:
+            _qt6_bin = os.path.join(_sp, "PyQt6", "Qt6", "bin")
+            if os.path.isdir(_qt6_bin):
+                _cur_path = os.environ.get("PATH", "")
+                if _qt6_bin.lower() not in _cur_path.lower():
+                    os.environ["PATH"] = _qt6_bin + os.pathsep + _cur_path
+                break
+    except Exception:
+        pass
+
+    # Supprimer les messages Qt multimedia si le backend reste absent
+    # (évite les 3 lignes de bruit dans la console)
+    os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia*=false")
+
     app = QApplication(sys.argv)
     app.setApplicationName("VibeSlicer Pro")
 
