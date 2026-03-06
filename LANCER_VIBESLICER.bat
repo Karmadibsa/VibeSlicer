@@ -70,6 +70,10 @@ if defined TORCH_LIB (
 )
 echo.
 
+:: Forcer le backend Windows Media Foundation pour QtMultimedia
+:: (le paquet PyQt6-Qt6 pip n'inclut pas les DLLs FFmpeg partagees)
+set "QT_MEDIA_BACKEND=windows"
+
 :: Lancer l'interface graphique
 echo Lancement de l'interface...
 echo.

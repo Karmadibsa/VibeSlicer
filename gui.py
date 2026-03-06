@@ -51,6 +51,20 @@ def _setup_qt6_path():
 
 _qt6_bin = _setup_qt6_path()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ÉTAPE 0b — Forcer le backend Windows Media Foundation
+#
+# Le paquet PyQt6-Qt6 (pip) n'inclut PAS les DLLs FFmpeg partagées
+# (avcodec, avformat, avutil, swscale, swresample). Le plugin
+# ffmpegmediaplugin.dll échoue donc systématiquement au chargement avec
+# "Le module spécifié est introuvable" → "No QtMultimedia backends found".
+#
+# En forçant QT_MEDIA_BACKEND=windows, Qt utilise le backend Windows Media
+# Foundation (windowsmediaplugin.dll) qui fonctionne nativement sur Windows
+# sans aucune dépendance externe.
+# ══════════════════════════════════════════════════════════════════════════════
+os.environ["QT_MEDIA_BACKEND"] = "windows"
+
 # Supprimer les avertissements Qt multimedia AVANT le chargement du module
 # (QT_LOGGING_RULES doit être positionné avant QApplication ET avant import)
 os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia*=false")
