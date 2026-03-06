@@ -563,26 +563,7 @@ class TimelineWidget(QWidget):
                        Qt.AlignmentFlag.AlignRight,
                        "✂  MODE COUPE  —  clic = couper ici  |  Échap : désactiver")
 
-        # ── IN/OUT SELECTION (supprimé — plus de markers In/Out) ─────────────
-        if False:
-            ix1 = self._ms_to_px(self.in_ms)
-            ix2 = self._ms_to_px(self.out_ms)
-            sel = QRect(ix1, wave_y, ix2 - ix1, self.WAVE_H)
-            p.fillRect(sel, QColor(59, 130, 246, 45))   # semi-transparent blue
-        if self.in_ms is not None:
-            ix = self._ms_to_px(self.in_ms)
-            if 0 <= ix <= w:
-                p.setPen(QPen(QColor("#3b82f6"), 2))    # blue — In
-                p.drawLine(ix, ruler_y, ix, seg_y + self.SEG_H)
-                p.setFont(QFont("Segoe UI", 8))
-                p.drawText(ix + 3, ruler_y + 12, "IN")
-        if self.out_ms is not None:
-            ox = self._ms_to_px(self.out_ms)
-            if 0 <= ox <= w:
-                p.setPen(QPen(QColor("#f97316"), 2))    # orange — Out
-                p.drawLine(ox, ruler_y, ox, seg_y + self.SEG_H)
-                p.setFont(QFont("Segoe UI", 8))
-                p.drawText(ox + 3, ruler_y + 12, "OUT")
+
 
         # ── PLAYHEAD ─────────────────────────────────────────────────────────
         ph_x = self._ms_to_px(self.playhead_ms)
