@@ -14,7 +14,7 @@ faster-whisper==1.1.1
 # Utilitaires
 colorama==0.4.6
 python-dotenv==1.0.1
-numpy==1.26.4
+numpy>=1.26.4
 
 # PyTorch — GPU (CUDA 12.x) ou CPU-only
 # GPU  : pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121

@@ -597,32 +597,59 @@ class VideoPlayerWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
+        _media_ready = False
         if QMEDIA_OK:
-            # ── QVideoWidget : rendu matériel natif ───────────────────────────
-            self._video_widget = QVideoWidget()
-            self._video_widget.setMinimumSize(480, 270)
-            self._video_widget.setSizePolicy(
-                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            self._video_widget.setStyleSheet("background: #000; border-radius: 4px;")
-            layout.addWidget(self._video_widget, 1)
+            try:
+                # ── QVideoWidget : rendu matériel natif ───────────────────────
+                self._video_widget = QVideoWidget()
+                self._video_widget.setMinimumSize(480, 270)
+                self._video_widget.setSizePolicy(
+                    QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                self._video_widget.setStyleSheet("background: #000; border-radius: 4px;")
+                layout.addWidget(self._video_widget, 1)
 
-            # ── QMediaPlayer : A/V sync géré nativement par Qt ───────────────
-            self._media = QMediaPlayer()
-            self._audio_out = QAudioOutput()
-            self._audio_out.setVolume(1.0)
-            self._media.setAudioOutput(self._audio_out)
-            self._media.setVideoOutput(self._video_widget)
+                # ── QMediaPlayer : A/V sync géré nativement par Qt ───────────
+                self._media = QMediaPlayer()
+                # Vérifier que le backend est vraiment disponible
+                if self._media.error() == QMediaPlayer.Error.ResourceError:
+                    raise RuntimeError("Backend QtMultimedia non disponible")
+                self._audio_out = QAudioOutput()
+                self._audio_out.setVolume(1.0)
+                self._media.setAudioOutput(self._audio_out)
+                self._media.setVideoOutput(self._video_widget)
 
-            self._media.positionChanged.connect(self._on_position_changed)
-            self._media.durationChanged.connect(self._on_duration_changed)
-            self._media.playbackStateChanged.connect(self._on_state_changed)
-        else:
-            # Fallback : QLabel si QtMultimedia non disponible
+                self._media.positionChanged.connect(self._on_position_changed)
+                self._media.durationChanged.connect(self._on_duration_changed)
+                self._media.playbackStateChanged.connect(self._on_state_changed)
+                _media_ready = True
+            except Exception:
+                self._media = None
+                # Le widget vidéo a peut-être été ajouté — on le retire proprement
+                try:
+                    layout.removeWidget(self._video_widget)
+                    self._video_widget.setParent(None)
+                except Exception:
+                    pass
+
+        if not _media_ready:
+            # Fallback : placeholder lisible quand QtMultimedia est absent
             self._media = None
-            lbl = QLabel("⚠ QtMultimedia non disponible\npip install PyQt6")
+            lbl = QLabel(
+                "⚠  Prévisualisation vidéo indisponible\n\n"
+                "Le backend QtMultimedia n'est pas chargé sur ce système.\n"
+                "Toutes les fonctions Analyser / Assembler / Exporter\n"
+                "fonctionnent normalement sans la prévisualisation.\n\n"
+                "Pour activer la preview :\n"
+                "  pip install PyQt6-Qt6==6.7.3\n"
+                "  (ou désinstallez puis réinstallez PyQt6)"
+            )
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("background:#000; color:#ef4444; font-size:13px;")
+            lbl.setStyleSheet(
+                "background:#0a0915; color:#9896b8;"
+                "font-size:12px; padding:20px; border-radius:6px;"
+            )
             lbl.setMinimumSize(480, 270)
+            lbl.setWordWrap(True)
             layout.addWidget(lbl, 1)
 
         # Seekbar
