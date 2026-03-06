@@ -20,13 +20,12 @@ def _check_deps():
     except ImportError:
         missing.append("numpy  →  pip install numpy")
     try:
-        from PIL import Image
+        import pydub
     except ImportError:
-        missing.append("Pillow  →  pip install Pillow")
+        missing.append("pydub  →  pip install pydub")
     if missing:
         msg = "Dépendances manquantes :\n\n" + "\n".join(missing)
         msg += "\n\nLancez le .bat pour les installer automatiquement."
-        # Essai d'afficher une boîte Windows native sans PyQt6
         try:
             import ctypes
             ctypes.windll.user32.MessageBoxW(0, msg, "VibeSlicer — Erreur de dépendances", 0x10)
@@ -65,6 +64,10 @@ try:
     PIL_OK = True
 except ImportError:
     PIL_OK = False
+
+# ── Import du moteur de traitement vidéo (FFmpeg, zéro moviepy) ──────────────
+import reel_maker as rm
+from pydub import AudioSegment
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PALETTE COULEURS
@@ -175,15 +178,13 @@ class AnalysisWorker(QThread):
 
     def run(self):
         try:
-            import reel_maker as rm
-            from pydub import AudioSegment
-            video, silences, working_path = rm.extract_and_detect_silences(
+            video_info, silences, working_path = rm.extract_and_detect_silences(
                 self.video_path,
                 silence_thresh=self.thresh,
                 min_silence_len=self.min_len,
                 progress_callback=lambda p, m: self.progress.emit(p, m)
             )
-            # Load audio for waveform
+            # Génération de la waveform depuis le WAV extrait
             self.progress.emit(0.85, "Génération de la waveform...")
             audio_path = os.path.join(rm.CONFIG["TEMP_DIR"], "temp_audio.wav")
             audio = AudioSegment.from_wav(audio_path)
@@ -200,7 +201,7 @@ class AnalysisWorker(QThread):
             if samples.max() > 0:
                 samples = samples / samples.max()
             self.progress.emit(1.0, f"{len(silences)} silence(s) détecté(s).")
-            self.finished.emit(video, silences, samples, audio, working_path)
+            self.finished.emit(video_info, silences, samples, None, working_path)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -219,20 +220,15 @@ class AssemblyWorker(QThread):
 
     def run(self):
         try:
-            import reel_maker as rm
-            import moviepy.editor as mp
-            # Reload VideoFileClip inside this thread to avoid cross-thread issues
-            video = mp.VideoFileClip(self._video_path)
-            try:
-                cb = lambda p, m: self.progress.emit(p, m)
-                cut_clip = rm.assemble_clips(video, self._silences, self._decisions, cb)
-                if cut_clip is None:
-                    self.error.emit("Aucun contenu après les coupes.")
-                    return
-                rm.save_raw_cut(cut_clip, self._raw_cut_path, cb)
-                self.finished.emit(self._raw_cut_path)
-            finally:
-                video.close()
+            cb = lambda p, m: self.progress.emit(p, m)
+            rm.assemble_clips(
+                self._video_path,
+                self._silences,
+                self._decisions,
+                self._raw_cut_path,
+                cb,
+            )
+            self.finished.emit(self._raw_cut_path)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -248,12 +244,8 @@ class TranscriptionWorker(QThread):
 
     def run(self):
         try:
-            import reel_maker as rm
-            import moviepy.editor as mp
-            cut_clip = mp.VideoFileClip(self._path)
             cb = lambda p, m: self.progress.emit(p, m)
-            words_data, txt_path = rm.transcribe(cut_clip, cb)
-            cut_clip.close()
+            words_data, txt_path = rm.transcribe(self._path, cb)
             self.finished.emit(words_data, txt_path)
         except Exception as e:
             self.error.emit(str(e))
@@ -272,13 +264,9 @@ class ExportWorker(QThread):
 
     def run(self):
         try:
-            import reel_maker as rm
-            import moviepy.editor as mp
-            cut_clip   = mp.VideoFileClip(self._raw_cut_path)
             final_words = rm.load_subs_from_file(self._txt_path)
             cb = lambda p, m: self.progress.emit(p, m)
-            rm.burn_subtitles(cut_clip, final_words, self._out_path, cb)
-            cut_clip.close()
+            rm.burn_subtitles(self._raw_cut_path, final_words, self._out_path, cb)
             self.finished.emit(self._out_path)
         except Exception as e:
             self.error.emit(str(e))
@@ -980,7 +968,6 @@ class RightPanel(QWidget):
         self._btn_export.setEnabled(True)
 
     def _open_output(self):
-        import reel_maker as rm
         folder = rm.CONFIG["OUTPUT_DIR"]
         if os.path.exists(folder):
             os.startfile(folder)
@@ -1512,7 +1499,6 @@ class VibeSlicer(QMainWindow):
         silences, decisions = self._get_assembly_data()
         name_root = os.path.splitext(os.path.basename(self._video_path))[0]
 
-        import reel_maker as rm
         self._raw_cut_path = os.path.join(rm.CONFIG["OUTPUT_DIR"], f"Raw_Cut_{name_root}.mp4")
         self._right.set_export_path(
             os.path.join(rm.CONFIG["OUTPUT_DIR"], f"Reel_Ready_{name_root}.mp4")
@@ -1592,7 +1578,6 @@ class VibeSlicer(QMainWindow):
         self._right._save_subs()
 
         name_root = os.path.splitext(os.path.basename(self._video_path))[0]
-        import reel_maker as rm
         out_path = os.path.join(rm.CONFIG["OUTPUT_DIR"], f"Reel_Ready_{name_root}.mp4")
 
         self._right._btn_export.setEnabled(False)
@@ -1645,42 +1630,33 @@ if __name__ == "__main__":
 
     sys.excepthook = _global_exception_hook
 
-    # Vérifier que reel_maker est importable (moviepy, pydub — pas torch, chargé lazily)
+    # reel_maker est déjà importé en haut du fichier.
+    # On vérifie juste que FFmpeg est accessible sur ce système.
     try:
-        import reel_maker  # noqa: F401 — teste moviepy + pydub seulement (faster_whisper est lazy)
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        # Erreur sur torch/CUDA = non bloquante : l'app peut tourner sans transcription
-        err_str = str(e)
-        is_torch_dll = "WinError 1114" in err_str or "c10.dll" in err_str or "torch" in err_str.lower()
+        import subprocess as _sp
+        _r = _sp.run(
+            ["ffmpeg", "-version"],
+            stdout=_sp.PIPE, stderr=_sp.PIPE,
+            creationflags=_sp.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if _r.returncode != 0:
+            raise RuntimeError("ffmpeg -version a retourné une erreur.")
+    except FileNotFoundError:
         box = QMessageBox()
-        box.setWindowTitle("VibeSlicer — Avertissement dépendances")
-        if is_torch_dll:
-            box.setIcon(QMessageBox.Icon.Warning)
-            box.setText(
-                "<b>Avertissement : CUDA / PyTorch non disponible.</b><br><br>"
-                "La transcription Whisper nécessite PyTorch avec les bons drivers GPU ou CPU.<br>"
-                "Les fonctions <b>Analyse</b> et <b>Assemblage</b> fonctionneront normalement.<br>"
-                "La <b>Transcription</b> échouera si vous l'utilisez sans résoudre ce problème.<br><br>"
-                "<b>Solution :</b> réinstaller PyTorch CPU-only :<br>"
-                "<code>pip install torch --index-url https://download.pytorch.org/whl/cpu</code><br><br>"
-                f"<i>Erreur : {e}</i>"
-            )
-            box.setDetailedText(tb)
-            box.exec()
-            # Continue — don't exit, basic features still work
-        else:
-            box.setIcon(QMessageBox.Icon.Critical)
-            box.setText(
-                "<b>Impossible de charger le moteur de traitement vidéo.</b><br><br>"
-                "Vérifiez que toutes les dépendances sont installées (moviepy, pydub, ffmpeg…) "
-                "en relançant le .bat.<br><br>"
-                f"<b>Erreur :</b> {e}"
-            )
-            box.setDetailedText(tb)
-            box.exec()
-            sys.exit(1)
+        box.setWindowTitle("VibeSlicer — FFmpeg introuvable")
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setText(
+            "<b>FFmpeg n'est pas installé ou n'est pas dans le PATH.</b><br><br>"
+            "VibeSlicer nécessite FFmpeg pour toutes ses opérations vidéo.<br><br>"
+            "<b>Solution :</b><br>"
+            "1. Téléchargez FFmpeg sur <b>ffmpeg.org</b><br>"
+            "2. Ajoutez le dossier <code>bin/</code> à votre variable PATH Windows.<br>"
+            "3. Relancez l'application."
+        )
+        box.exec()
+        sys.exit(1)
+    except Exception as e:
+        pass  # FFmpeg présent mais version étrange — on continue
 
     win = VibeSlicer()
     win.show()

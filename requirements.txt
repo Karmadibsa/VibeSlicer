@@ -1,11 +1,24 @@
-moviepy<2.0.0
-faster-whisper
-pydub
-colorama
-python-dotenv
-Pillow
-PyQt6
+# VibeSlicer Pro — dépendances fixées
+# Moteur vidéo : FFmpeg (externe, à installer séparément)
+# Pas de moviepy — toutes les opérations vidéo passent par ffmpeg subprocess
 
-torch
-torchaudio
-torchvision
+# Interface graphique
+PyQt6==6.7.1
+
+# Traitement audio (détection des silences)
+pydub==0.25.1
+
+# Transcription Whisper (modèle + accélération)
+faster-whisper==1.1.1
+
+# Utilitaires
+colorama==0.4.6
+python-dotenv==1.0.1
+numpy==1.26.4
+
+# PyTorch — GPU (CUDA 12.x) ou CPU-only
+# GPU  : pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+# CPU  : pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+# (décommentez la ligne qui correspond à votre machine)
+# torch==2.3.1
+# torchaudio==2.3.1
