@@ -1,0 +1,652 @@
+import os
+import subprocess
+import msvcrt
+from datetime import timedelta
+
+# ==================================================================================
+# CUDA AUTO-DETECTION (Inject System Path for DLLs)
+# ==================================================================================
+if os.name == 'nt':
+    try:
+        os.add_dll_directory(os.getcwd())
+        os.add_dll_directory(os.path.dirname(os.path.abspath(__file__)))
+    except AttributeError:
+        pass
+
+    # ── Ajouter torch/lib + ctranslate2/ au DLL search path ──────────────────
+    # ctranslate2 a besoin de c10.dll, torch_cpu.dll, fbgemm.dll (dans torch/lib)
+    # Windows ne cherche PAS automatiquement dans site-packages.
+    #
+    # STRATÉGIE: utiliser importlib.util.find_spec() qui trouve le chemin du
+    # paquet SANS l'importer (= sans charger les DLLs). Cela casse le cycle :
+    #   "import torch échoue car torch/lib absent" ↔ "torch/lib absent car import échoue"
+    import sys as _sys
+    import importlib.util as _iutil
+
+    def _register_dll_dir(path):
+        """Ajoute path à la recherche DLL via add_dll_directory ET via PATH."""
+        ok = False
+        try:
+            os.add_dll_directory(path)
+            ok = True
+        except Exception as _ex:
+            pass  # PATH suffit dans la plupart des cas
+        os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+        return ok
+
+    def _find_pkg_dir(pkg_name):
+        """Retourne le dossier du paquet sans l'importer (find_spec)."""
+        try:
+            spec = _iutil.find_spec(pkg_name)
+            if spec is None:
+                return None
+            # Pour un paquet : submodule_search_locations = [dossier du paquet]
+            if spec.submodule_search_locations:
+                locs = list(spec.submodule_search_locations)
+                if locs and os.path.isdir(locs[0]):
+                    return locs[0]
+            # Fallback : déduire depuis origin (__init__.py)
+            if spec.origin and os.path.isfile(spec.origin):
+                return os.path.dirname(spec.origin)
+        except Exception as _ex:
+            print(f"  [WARN] find_spec('{pkg_name}') : {_ex}")
+        return None
+
+    # ── torch/lib ──────────────────────────────────────────────────────────────
+    _torch_dir = _find_pkg_dir("torch")
+    print(f"  [DLL] torch -> {_torch_dir or 'INTROUVABLE'}")
+    if _torch_dir:
+        _torch_lib = os.path.join(_torch_dir, "lib")
+        if os.path.isdir(_torch_lib):
+            _ok = _register_dll_dir(_torch_lib)
+            print(f"  [OK] torch/lib {'add_dll_directory' if _ok else 'PATH seulement'} : {_torch_lib}")
+        else:
+            print(f"  [WARN] torch/lib absent dans : {_torch_dir}")
+    else:
+        print("  [WARN] torch non trouve via find_spec -- recherche manuelle...")
+        for _sp in _sys.path:
+            _candidate = os.path.join(_sp, "torch", "lib")
+            if os.path.isdir(_candidate):
+                _ok = _register_dll_dir(_candidate)
+                print(f"  [OK] torch/lib (manuel) {'add_dll_directory' if _ok else 'PATH'} : {_candidate}")
+                break
+        else:
+            print("  [ERROR] torch/lib INTROUVABLE -- c10.dll va echouer !")
+
+    # -- ctranslate2/ --
+    _ct2_dir = _find_pkg_dir("ctranslate2")
+    if _ct2_dir and os.path.isdir(_ct2_dir):
+        _ok = _register_dll_dir(_ct2_dir)
+        print(f"  [OK] ctranslate2 {'add_dll_directory' if _ok else 'PATH seulement'} : {_ct2_dir}")
+
+# ── Détection automatique de toutes les versions CUDA installées ─────────────
+_cuda_base = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+_cuda_loaded = []
+if os.path.exists(_cuda_base):
+    try:
+        _all_versions = sorted(
+            [v for v in os.listdir(_cuda_base) if v.startswith("v")],
+            key=lambda v: [int(x) for x in v.lstrip("v").split(".")],
+            reverse=True   # version la plus récente en premier
+        )
+        for _v in _all_versions:
+            _bin = os.path.join(_cuda_base, _v, "bin")
+            if os.path.exists(_bin):
+                try:
+                    os.add_dll_directory(_bin)
+                    _cuda_loaded.append(_v)
+                    print(f"  [OK] CUDA {_v} : {_bin}")
+                except Exception as _ex:
+                    print(f"  [WARN] CUDA {_v} : impossible d'ajouter DLL path : {_ex}")
+    except Exception as _ex:
+        print(f"  [WARN] Erreur detection CUDA : {_ex}")
+
+# Aussi ajouter %CUDA_PATH%/bin si defini dans l'environnement
+_cuda_env = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME")
+if _cuda_env:
+    _cuda_env_bin = os.path.join(_cuda_env, "bin")
+    if os.path.exists(_cuda_env_bin):
+        try:
+            os.add_dll_directory(_cuda_env_bin)
+            print(f"  [OK] CUDA env : {_cuda_env_bin}")
+        except: pass
+
+# ==================================================================================
+
+from dotenv import load_dotenv
+from colorama import init, Fore, Style
+import moviepy.editor as mp
+from pydub import AudioSegment, silence
+# NOTE: faster_whisper (and torch) are imported lazily inside transcribe()
+# to avoid DLL loading issues at startup when CUDA is not available.
+
+init(autoreset=True)
+load_dotenv()
+
+# DETECT IMAGEMAGICK
+if os.name == 'nt':
+    try:
+        from shutil import which
+        im_path = which("magick")
+        if im_path:
+            os.environ["IMAGEMAGICK_BINARY"] = im_path
+        else:
+            common_paths = [
+                r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe",
+                r"C:\Program Files\ImageMagick-7.1.3-Q16-HDRI\magick.exe",
+                r"C:\Program Files\ImageMagick-7.1.1-Q16-HDRI\magick.exe",
+            ]
+            for p in common_paths:
+                if os.path.exists(p):
+                    os.environ["IMAGEMAGICK_BINARY"] = p
+                    break
+    except:
+        pass
+
+if os.name == 'nt':
+    target_im = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
+    if os.path.exists(target_im):
+        os.environ["IMAGEMAGICK_BINARY"] = target_im
+        try:
+            import moviepy.config_defaults
+            moviepy.config_defaults.IMAGEMAGICK_BINARY = target_im
+        except ImportError:
+            pass
+    else:
+        print("  ⚠ ImageMagick not found at expected path. Trying 'magick' in PATH...")
+        os.environ["IMAGEMAGICK_BINARY"] = "magick"
+
+# ==================================================================================
+# 1. CONFIGURATION
+# ==================================================================================
+CONFIG = {
+    "INPUT_DIR": os.path.abspath("input"),
+    "OUTPUT_DIR": os.path.abspath("output"),
+    "ASSETS_DIR": os.path.abspath("assets"),
+    "TEMP_DIR": os.path.abspath("temp"),
+    "SILENCE_THRESH": -35,
+    "MIN_SILENCE_LEN": 500,
+    "PREVIEW_CTX": 1000,
+    "WHISPER_MODEL_SIZE": "small",
+    "COMPUTE_TYPE": "float16",
+    "DEVICE": "cuda",
+    "FONT_NAME": "Poppins-Bold.ttf",
+    "FONT_SIZE": 80,
+    "FONT_COLOR": "white",
+    "STROKE_COLOR": "#8A2BE2",
+    "STROKE_WIDTH": 3,
+    "POS": ("center", "center"),
+}
+
+for d in [CONFIG["INPUT_DIR"], CONFIG["OUTPUT_DIR"], CONFIG["ASSETS_DIR"], CONFIG["TEMP_DIR"]]:
+    os.makedirs(d, exist_ok=True)
+
+# ==================================================================================
+# 2. HELPER FUNCTIONS
+# ==================================================================================
+
+def print_step(msg):
+    print(f"\n{Fore.CYAN}{Style.BRIGHT}[STEP] {msg}{Style.RESET_ALL}")
+
+def print_info(msg):
+    print(f"{Fore.GREEN}  ℹ {msg}")
+
+def print_warn(msg):
+    print(f"{Fore.YELLOW}  ⚠ {msg}")
+
+def format_time(ms):
+    """Convert ms to MM:SS.mmm"""
+    total_s = ms / 1000.0
+    minutes = int(total_s // 60)
+    seconds = total_s % 60
+    return f"{minutes:02d}:{seconds:06.3f}"
+
+def get_font_path():
+    asset_font = os.path.join(CONFIG["ASSETS_DIR"], CONFIG["FONT_NAME"])
+    if os.path.exists(asset_font):
+        return asset_font
+    print_warn(f"Font not found at {asset_font}, using 'Arial' as fallback.")
+    return "Arial"
+
+# ==================================================================================
+# 3. PHASE 1 — SPLIT INTO TWO GUI-CALLABLE FUNCTIONS
+# ==================================================================================
+
+def extract_and_detect_silences(video_path, silence_thresh=None, min_silence_len=None,
+                                 progress_callback=None):
+    """
+    Phase 1a: Extract audio and detect silences.
+    Returns (video, silences) where silences is a list of (start_ms, end_ms).
+    progress_callback(float 0-1, str message) is called if provided.
+    """
+    thresh = silence_thresh if silence_thresh is not None else CONFIG["SILENCE_THRESH"]
+    min_len = min_silence_len if min_silence_len is not None else CONFIG["MIN_SILENCE_LEN"]
+
+    def _progress(p, msg):
+        if progress_callback:
+            progress_callback(p, msg)
+        else:
+            print_info(msg)
+
+    # ── Normalisation CFR (Constant Frame Rate) ───────────────────────────────
+    # Les vidéos VFR (smartphones, captures d'écran) causent des désynchros à l'export.
+    # On convertit en CFR 30fps via ffmpeg AVANT toute analyse.
+    _progress(0.0, "Normalisation CFR (30fps)...")
+    cfr_path = os.path.join(CONFIG["TEMP_DIR"], "temp_cfr.mp4")
+    try:
+        cfr_result = subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path,
+             "-c:v", "libx264", "-crf", "18", "-preset", "ultrafast",
+             "-r", "30", "-c:a", "aac", "-b:a", "192k",
+             cfr_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300
+        )
+        if cfr_result.returncode == 0 and os.path.exists(cfr_path):
+            working_path = cfr_path
+        else:
+            working_path = video_path  # Fallback: use original
+    except Exception:
+        working_path = video_path  # Fallback if ffmpeg missing
+
+    _progress(0.05, "Chargement de la vidéo normalisée...")
+    video = mp.VideoFileClip(working_path)
+
+    audio_path = os.path.join(CONFIG["TEMP_DIR"], "temp_audio.wav")
+    _progress(0.1, "Extraction de l'audio...")
+    video.audio.write_audiofile(audio_path, logger=None)
+
+    _progress(0.4, "Chargement de l'audio...")
+    audio = AudioSegment.from_wav(audio_path)
+
+    _progress(0.5, f"Détection des silences (seuil: {thresh}dB, min: {min_len}ms)...")
+    silences = silence.detect_silence(
+        audio,
+        min_silence_len=min_len,
+        silence_thresh=thresh
+    )
+    _progress(1.0, f"{len(silences)} silence(s) détecté(s).")
+    # Return working_path so the caller can pass the CFR file to AssemblyWorker
+    return video, silences, working_path
+
+
+def assemble_clips(video, silences, decisions, progress_callback=None):
+    """
+    Phase 1b: Assemble clips based on cut decisions.
+    decisions: list of bool, same length as silences. True = cut, False = keep.
+    Returns concatenated VideoFileClip or None if nothing to assemble.
+    progress_callback(float 0-1, str message) is called if provided.
+    """
+    def _progress(p, msg):
+        if progress_callback:
+            progress_callback(p, msg)
+        else:
+            print_info(msg)
+
+    final_clips = []
+    current_pos_ms = 0
+
+    for i, ((start_ms, end_ms), should_cut) in enumerate(zip(silences, decisions)):
+        _progress(i / max(len(silences), 1), f"Traitement silence {i+1}/{len(silences)}...")
+        if should_cut:
+            if start_ms > current_pos_ms:
+                seg = video.subclip(current_pos_ms / 1000.0, start_ms / 1000.0)
+                final_clips.append(seg)
+            current_pos_ms = end_ms
+
+    # Add remainder
+    video_len_ms = video.duration * 1000.0
+    if current_pos_ms < video_len_ms:
+        seg = video.subclip(current_pos_ms / 1000.0, video_len_ms / 1000.0)
+        final_clips.append(seg)
+
+    if not final_clips:
+        video.close()
+        return None
+
+    _progress(0.9, "Assemblage des clips...")
+    final_cut = mp.concatenate_videoclips(final_clips)
+    # NOTE: do NOT close video here — subclips are lazy and still need the source
+    # when write_videofile is called in save_raw_cut. The caller closes it.
+    _progress(1.0, "Assemblage terminé.")
+    return final_cut
+
+
+def save_raw_cut(cut_clip, raw_cut_path, progress_callback=None):
+    """Save the assembled clip to disk and reload it. Returns reloaded VideoFileClip."""
+    def _progress(p, msg):
+        if progress_callback:
+            progress_callback(p, msg)
+        else:
+            print_info(msg)
+
+    _progress(0.0, f"Sauvegarde du montage brut...")
+    try:
+        cut_clip.write_videofile(
+            raw_cut_path, fps=30, codec="h264_nvenc",
+            audio_codec="aac", threads=4, preset="fast", logger=None
+        )
+    except Exception:
+        cut_clip.write_videofile(
+            raw_cut_path, fps=30, codec="libx264",
+            audio_codec="aac", logger=None
+        )
+    cut_clip.close()
+    _progress(0.9, "Rechargement depuis le disque...")
+    reloaded = mp.VideoFileClip(raw_cut_path)
+    _progress(1.0, "Montage brut prêt.")
+    return reloaded
+
+
+# ==================================================================================
+# 4. PHASE 2 — TRANSCRIPTION (GUI-CALLABLE)
+# ==================================================================================
+
+def transcribe(cut_clip, progress_callback=None):
+    """
+    Phase 2: Run Whisper transcription on cut_clip audio.
+    Returns list of {"start", "end", "word"} dicts and writes temp_subs.txt.
+    progress_callback(float 0-1, str message) is called if provided.
+    """
+    def _progress(p, msg):
+        if progress_callback:
+            progress_callback(p, msg)
+        else:
+            print_info(msg)
+
+    temp_audio = os.path.join(CONFIG["TEMP_DIR"], "cut_audio.wav")
+    _progress(0.0, "Extraction audio pour transcription...")
+    cut_clip.audio.write_audiofile(temp_audio, fps=44100, logger=None)
+
+    def run_transcription_safe(device_type, compute_type, label=""):
+        from faster_whisper import WhisperModel  # lazy import — torch DLLs loaded only here
+        _progress(0.3, f"⏳ Chargement modèle Whisper ({label or device_type})...")
+        model = WhisperModel(CONFIG["WHISPER_MODEL_SIZE"], device=device_type, compute_type=compute_type)
+        _progress(0.5, f"🔄 Transcription en cours ({label or device_type})...")
+        segs, _ = model.transcribe(temp_audio, word_timestamps=True)
+        return list(segs)
+
+    def _is_dll_error(e):
+        s = str(e)
+        return "WinError 1114" in s or "c10.dll" in s
+
+    def _diagnose_gpu_error(e):
+        """Retourne un message lisible sur la cause de l'échec GPU."""
+        s = str(e).lower()
+        if "cudnn" in s or "libcudnn" in s:
+            return "cuDNN introuvable — installez cuDNN depuis nvidia.com"
+        if "cublas" in s or "libcublas" in s:
+            return "cuBLAS introuvable — CUDA installation incomplète"
+        if "cuda" in s and ("not found" in s or "failed" in s or "unavailable" in s):
+            return "CUDA non disponible pour ctranslate2"
+        if "out of memory" in s or "oom" in s:
+            return "VRAM insuffisante — essayez un modèle plus petit"
+        if "no cuda" in s or "cuda device" in s:
+            return "Pas de GPU CUDA détecté"
+        return str(e)[:120]
+
+    # ── Tentative GPU ────────────────────────────────────────────────────────────
+    gpu_used = False
+    gpu_error_msg = None
+    if CONFIG["DEVICE"] == "cuda":
+        try:
+            print_info("🎮 Tentative GPU (CUDA)...")
+            segments_list = run_transcription_safe(
+                CONFIG["DEVICE"], CONFIG["COMPUTE_TYPE"], label="GPU CUDA"
+            )
+            gpu_used = True
+            _progress(0.55, "✅ Transcription GPU en cours...")
+            print_info("✅ GPU utilisé avec succès pour la transcription !")
+        except Exception as gpu_e:
+            gpu_error_msg = _diagnose_gpu_error(gpu_e)
+            print_warn(f"GPU échoué : {gpu_error_msg}")
+            print_warn(f"  Détail : {type(gpu_e).__name__}: {gpu_e}")
+            _progress(0.4, f"⚠ GPU échoué ({gpu_error_msg}) — bascule CPU...")
+
+    # ── Fallback CPU ─────────────────────────────────────────────────────────────
+    if not gpu_used:
+        try:
+            print_info("🖥 Transcription CPU (int8)...")
+            segments_list = run_transcription_safe("cpu", "int8", label="CPU")
+            _progress(0.55, "✅ Transcription CPU en cours...")
+            print_info("✅ CPU utilisé pour la transcription.")
+            if gpu_error_msg:
+                print_warn(f"  (GPU non disponible : {gpu_error_msg})")
+                print_warn("  → Installez cuDNN si vous voulez la transcription GPU.")
+        except Exception as cpu_e:
+            if _is_dll_error(cpu_e):
+                raise RuntimeError(
+                    "ctranslate2 ne peut pas charger ses DLLs même en mode CPU.\n\n"
+                    "➡ Relancez LANCER_VIBESLICER.bat pour réinstaller les dépendances.\n\n"
+                    f"Erreur GPU  : {gpu_error_msg or 'N/A'}\n"
+                    f"Erreur CPU : {cpu_e}"
+                ) from None
+            raise RuntimeError(
+                f"Transcription CPU échouée : {cpu_e}\n\n"
+                f"(Erreur GPU initiale : {gpu_error_msg or 'N/A'})"
+            ) from cpu_e
+
+    words_data = []
+    for s in segments_list:
+        for w in s.words:
+            words_data.append({
+                "start": w.start,
+                "end": w.end,
+                "word": w.word.strip()
+            })
+
+    txt_path = os.path.join(CONFIG["TEMP_DIR"], "temp_subs.txt")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("# START | END | WORD\n")
+        for wd in words_data:
+            f.write(f"{wd['start']:.2f} | {wd['end']:.2f} | {wd['word']}\n")
+
+    _progress(1.0, f"{len(words_data)} mots transcrits.")
+    return words_data, txt_path
+
+
+def load_subs_from_file(txt_path):
+    """Parse temp_subs.txt and return list of {"start", "end", "word"}."""
+    final_words = []
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.split("|")
+            if len(parts) >= 3:
+                try:
+                    final_words.append({
+                        "start": float(parts[0].strip()),
+                        "end": float(parts[1].strip()),
+                        "word": parts[2].strip()
+                    })
+                except:
+                    pass
+    return final_words
+
+
+# ==================================================================================
+# 5. PHASE 3 — BURN SUBTITLES (GUI-CALLABLE)
+# ==================================================================================
+
+def burn_subtitles(video_clip, words_data, output_path, progress_callback=None):
+    """
+    Phase 3: Burn subtitles onto video_clip and export to output_path.
+    progress_callback(float 0-1, str message) is called if provided.
+    """
+    def _progress(p, msg):
+        if progress_callback:
+            progress_callback(p, msg)
+        else:
+            print_info(msg)
+
+    _progress(0.0, "Création des clips de sous-titres...")
+    font_path = get_font_path()
+    fps = video_clip.fps or 30
+    frame_duration = 1.0 / fps
+
+    text_clips = []
+    for item in words_data:
+        start_frame = round(item["start"] * fps) / fps
+        end_frame = round(item["end"] * fps) / fps
+        duration = max(frame_duration, end_frame - start_frame)
+
+        txt = (mp.TextClip(
+            item["word"],
+            font=font_path,
+            fontsize=CONFIG["FONT_SIZE"],
+            color=CONFIG["FONT_COLOR"],
+            stroke_color=CONFIG["STROKE_COLOR"],
+            stroke_width=CONFIG["STROKE_WIDTH"],
+            method='label'
+        )
+        .set_position(CONFIG["POS"])
+        .set_start(start_frame)
+        .set_duration(duration))
+        text_clips.append(txt)
+
+    _progress(0.3, "Composition vidéo + sous-titres...")
+    final_video = mp.CompositeVideoClip([video_clip] + text_clips)
+
+    _progress(0.4, f"Export vers {output_path}...")
+    try:
+        final_video.write_videofile(
+            output_path, fps=30, codec="h264_nvenc",
+            audio_codec="aac", preset="fast", threads=4
+        )
+    except Exception as e:
+        _progress(0.5, f"NVENC échoué ({e}), bascule CPU...")
+        final_video.write_videofile(
+            output_path, fps=30, codec="libx264", audio_codec="aac"
+        )
+
+    _progress(1.0, f"Export terminé : {output_path}")
+    return output_path
+
+
+# ==================================================================================
+# 6. CLI LEGACY — kept for backward compatibility (python reel_maker.py still works)
+# ==================================================================================
+
+def wait_for_key_validation():
+    print(f"{Fore.YELLOW}  >> [ESPACE] Couper | [N] Garder | [A] TOUT Couper (Auto){Style.RESET_ALL}", end="", flush=True)
+    while True:
+        if msvcrt.kbhit():
+            key = msvcrt.getch().lower()
+            if key == b' ':
+                print(f"\n  {Fore.RED}X Coupé{Style.RESET_ALL}")
+                return 'cut'
+            elif key == b'n':
+                print(f"\n  {Fore.GREEN}O Gardé{Style.RESET_ALL}")
+                return 'keep'
+            elif key == b'a':
+                print(f"\n  {Fore.RED}>>> ACTIVATION AUTO-CUT <<< (Coupe tout le reste){Style.RESET_ALL}")
+                return 'all'
+
+
+def fast_cut_workflow(video_path):
+    """Legacy CLI wrapper around extract_and_detect_silences + assemble_clips."""
+    print_step("Phase 1: Fast Cut (Detection & Validation)")
+
+    video, silences = extract_and_detect_silences(video_path)
+    print_info(f"Found {len(silences)} potential cuts.")
+
+    decisions = []
+    auto_cut_remaining = False
+
+    for i, (start_ms, end_ms) in enumerate(silences):
+        if auto_cut_remaining:
+            decisions.append(True)
+            print(f"{Fore.RED}.{Style.RESET_ALL}", end="", flush=True)
+            continue
+
+        ctx = CONFIG["PREVIEW_CTX"]
+        prev_start = max(0, start_ms - ctx)
+        prev_end = end_ms + ctx
+        prev_duration = (prev_end - prev_start) / 1000.0
+
+        print(f"\n{Fore.MAGENTA}--- Silence #{i+1}: {format_time(start_ms)} -> {format_time(end_ms)} ({end_ms-start_ms}ms) ---")
+
+        cmd = [
+            "ffplay",
+            "-ss", str(prev_start / 1000.0),
+            "-t", str(prev_duration),
+            "-autoexit",
+            "-window_title", f"CUT #{i+1} ?",
+            "-x", "500", "-y", "300",
+            "-hide_banner", "-loglevel", "error",
+            video_path
+        ]
+        try:
+            subprocess.run(cmd)
+        except FileNotFoundError:
+            print(f"\n{Fore.RED}[ERREUR] 'ffplay' non trouvé !{Style.RESET_ALL}")
+
+        action = wait_for_key_validation()
+        if action == 'cut':
+            decisions.append(True)
+        elif action == 'all':
+            decisions.append(True)
+            auto_cut_remaining = True
+        else:
+            decisions.append(False)
+
+    return assemble_clips(video, silences, decisions)
+
+
+def transcribe_and_burn(video_clip, original_filename):
+    """Legacy CLI wrapper around transcribe + burn_subtitles."""
+    print_step("Phase 2: Whisper Transcription")
+
+    words_data, txt_path = transcribe(video_clip)
+
+    print(f"\n{Fore.CYAN}--- PAUSE ---{Style.RESET_ALL}")
+    print(f"Fichier de sous-titres généré : {Fore.YELLOW}{txt_path}{Style.RESET_ALL}")
+    input(f"{Fore.WHITE}Editez le fichier si besoin, sauvegardez, puis appuyez sur [ENTRÉE] pour continuer...{Style.RESET_ALL}")
+
+    final_words = load_subs_from_file(txt_path)
+
+    print_step("Phase 3: Burning Subtitles (Clean Style)")
+    name_root = os.path.splitext(original_filename)[0]
+    output_filename = f"Reel_Ready_{name_root}.mp4"
+    output_path = os.path.join(CONFIG["OUTPUT_DIR"], output_filename)
+
+    burn_subtitles(video_clip, final_words, output_path)
+    print(f"\n{Fore.GREEN}SUCCESS! Video ready: {output_path}{Style.RESET_ALL}")
+
+
+def main():
+    print(f"{Fore.MAGENTA}=== REEL MAKER: ESSENTIAL CUT & SUB ==={Style.RESET_ALL}")
+
+    files = [f for f in os.listdir(CONFIG["INPUT_DIR"]) if f.lower().endswith(('.mp4', '.mov', '.mkv'))]
+    if not files:
+        print_warn(f"No video found in {CONFIG['INPUT_DIR']}")
+        return
+
+    print_info(f"Found {len(files)} video(s) to process.")
+
+    for i, filename in enumerate(files):
+        print(f"\n{Fore.CYAN}--- Processing File {i+1}/{len(files)}: {filename} ---{Style.RESET_ALL}")
+        target_vid = os.path.join(CONFIG["INPUT_DIR"], filename)
+
+        try:
+            cut_clip = fast_cut_workflow(target_vid)
+
+            if cut_clip is None:
+                print_warn(f"Skipping {filename} — no content after cuts.")
+                continue
+
+            name_root = os.path.splitext(filename)[0]
+            raw_cut_path = os.path.join(CONFIG["OUTPUT_DIR"], f"Raw_Cut_{name_root}.mp4")
+
+            print_step(f"Saving Intermediate Cut Video to {raw_cut_path}...")
+            cut_clip = save_raw_cut(cut_clip, raw_cut_path)
+            print(f"{Fore.GREEN}>> Video monté (sans sous-titres) sauvegardé !{Style.RESET_ALL}")
+
+            transcribe_and_burn(cut_clip, filename)
+
+        except Exception as e:
+            print(f"{Fore.RED}Error processing {filename}: {e}{Style.RESET_ALL}")
+
+
+if __name__ == "__main__":
+    main()

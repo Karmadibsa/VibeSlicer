@@ -1,3 +1,11 @@
+moviepy<2.0.0
 faster-whisper
 pydub
 colorama
+python-dotenv
+Pillow
+PyQt6
+
+torch
+torchaudio
+torchvision
