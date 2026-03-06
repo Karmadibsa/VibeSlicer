@@ -27,7 +27,7 @@ CONFIG = {
     "ASSETS_DIR": os.path.abspath("assets"),
     "TEMP_DIR":   os.path.abspath("temp"),
     # Détection des silences
-    "SILENCE_THRESH":    -35,   # dB
+    "SILENCE_THRESH":    -54,   # dB (valeur basse = uniquement vrais silences)
     "MIN_SILENCE_LEN":   500,   # ms
     # Whisper
     "WHISPER_MODEL_SIZE": "small",
@@ -42,9 +42,9 @@ CONFIG = {
         "BorderStyle=1,"
         "Outline=3,"
         "Alignment=2,"
-        "MarginV=120"
+        "MarginV=40"
     ),
-    "MAX_WORDS_PER_SUB": 4,
+    "MAX_WORDS_PER_SUB": 8,
 }
 
 for d in [CONFIG["INPUT_DIR"], CONFIG["OUTPUT_DIR"], CONFIG["ASSETS_DIR"], CONFIG["TEMP_DIR"]]:
@@ -459,7 +459,8 @@ def load_subs_from_file(txt_path: str) -> list:
 # ==================================================================================
 
 def burn_subtitles(video_path: str, words_data: list, output_path: str,
-                   progress_callback=None) -> str:
+                   progress_callback=None,
+                   music_path: str = None, music_volume: float = 0.15) -> str:
     """
     Phase 3 : Grave les sous-titres sur la vidéo via FFmpeg.
     Utilise le filtre 'subtitles' natif FFmpeg — zéro MoviePy, zéro Pillow.
@@ -472,6 +473,10 @@ def burn_subtitles(video_path: str, words_data: list, output_path: str,
         Mots à afficher (depuis load_subs_from_file).
     output_path : str
         Chemin du fichier de sortie final.
+    music_path : str, optional
+        Chemin vers un fichier audio pour la musique de fond.
+    music_volume : float
+        Volume de la musique de fond (0.0–1.0). Défaut 0.15.
     """
     def _p(p, msg):
         if progress_callback:
@@ -507,10 +512,26 @@ def burn_subtitles(video_path: str, words_data: list, output_path: str,
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-vf", vf_chain,
-        "-c:v", codec,
-        "-pix_fmt", "yuv420p",
     ]
+
+    # Musique de fond : ajout comme 2ème input + filtre amix
+    af_chain = None
+    if music_path and os.path.isfile(music_path):
+        _p(0.15, f"Ajout musique de fond ({int(music_volume * 100)}%)...")
+        cmd.extend(["-stream_loop", "-1", "-i", music_path])
+        # amix : [0:a] = audio original (volume 1.0), [1:a] = musique (volume réduit)
+        af_chain = (
+            f"[1:a]volume={music_volume:.2f}[bg];"
+            f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        )
+
+    cmd.extend(["-vf", vf_chain])
+
+    if af_chain:
+        cmd.extend(["-filter_complex", af_chain, "-map", "0:v", "-map", "[aout]"])
+
+    cmd.extend(["-c:v", codec, "-pix_fmt", "yuv420p"])
+
     if codec == "libx264":
         cmd.extend(["-preset", "slow", "-crf", "21"])
     else:

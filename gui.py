@@ -343,17 +343,24 @@ class ExportWorker(QThread):
     finished = pyqtSignal(str)
     error    = pyqtSignal(str)
 
-    def __init__(self, raw_cut_path, txt_path, out_path):
+    def __init__(self, raw_cut_path, txt_path, out_path,
+                 music_path=None, music_volume=0.15):
         super().__init__()
         self._raw_cut_path = raw_cut_path
         self._txt_path     = txt_path
         self._out_path     = out_path
+        self._music_path   = music_path
+        self._music_volume = music_volume
 
     def run(self):
         try:
             final_words = rm.load_subs_from_file(self._txt_path)
             cb = lambda p, m: self.progress.emit(p, m)
-            rm.burn_subtitles(self._raw_cut_path, final_words, self._out_path, cb)
+            rm.burn_subtitles(
+                self._raw_cut_path, final_words, self._out_path, cb,
+                music_path=self._music_path,
+                music_volume=self._music_volume,
+            )
             self.finished.emit(self._out_path)
         except Exception as e:
             self.error.emit(str(e))
@@ -380,19 +387,22 @@ class TimelineWidget(QWidget):
         self.setMaximumHeight(self.TOTAL_H + 10)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.setMouseTracking(True)
 
         self.duration_ms  = 0
         self.waveform     = None    # numpy array normalised 0-1
         self.playhead_ms  = 0
         self._zoom        = 1.0     # pixels per ms
         self._scroll_px   = 0       # horizontal scroll offset in pixels
-        self.in_ms        = None    # manual In point
-        self.out_ms       = None    # manual Out point
         # Segment model: boundaries divide video into independently toggleable segments
         self._boundaries  = []      # sorted ms positions [0, ..., duration_ms]
         self._seg_keep    = []      # True=keep  False=cut  (one per interval)
         # Cut Tool
         self._cut_mode    = False
+        # Pan (middle-click drag)
+        self._panning     = False
+        self._pan_start_x = 0
+        self._pan_start_scroll = 0
 
     def load(self, duration_ms, silences, decisions, waveform):
         """Load from silence-list model — converts internally to segment model."""
@@ -420,11 +430,6 @@ class TimelineWidget(QWidget):
 
     def set_playhead(self, ms):
         self.playhead_ms = ms
-        self.update()
-
-    def set_in_out(self, in_ms, out_ms):
-        self.in_ms  = in_ms
-        self.out_ms = out_ms
         self.update()
 
     # ── Segment model helpers ─────────────────────────────────────────────────
@@ -558,8 +563,8 @@ class TimelineWidget(QWidget):
                        Qt.AlignmentFlag.AlignRight,
                        "✂  MODE COUPE  —  clic = couper ici  |  Échap : désactiver")
 
-        # ── IN/OUT SELECTION ─────────────────────────────────────────────────
-        if self.in_ms is not None and self.out_ms is not None and self.in_ms < self.out_ms:
+        # ── IN/OUT SELECTION (supprimé — plus de markers In/Out) ─────────────
+        if False:
             ix1 = self._ms_to_px(self.in_ms)
             ix2 = self._ms_to_px(self.out_ms)
             sel = QRect(ix1, wave_y, ix2 - ix1, self.WAVE_H)
@@ -595,52 +600,85 @@ class TimelineWidget(QWidget):
         p.end()
 
     def mousePressEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
         px = event.position().x()
         py = event.position().y()
 
+        # ── Middle-click → start panning ──────────────────────────────────
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning = True
+            self._pan_start_x = px
+            self._pan_start_scroll = self._scroll_px
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
         if self._cut_mode:
             # ── CUT TOOL (razor) ──────────────────────────────────────────────
-            # Single click = place a razor cut at this position
             ms = max(0.0, min(float(self.duration_ms), self._px_to_ms(px)))
             self.cut_placed.emit(ms)
         else:
             # ── NORMAL MODE ───────────────────────────────────────────────────
-            if py <= self.RULER_H:
-                # Click on ruler → seek
-                ms = max(0.0, self._px_to_ms(px))
-                self.seek_requested.emit(ms / 1000.0)
-            else:
-                # Click on segment area → toggle keep/cut
+            seg_y = self.RULER_H + self.WAVE_H + 4
+            if py >= seg_y:
+                # Click on segment strip → toggle keep/cut
                 idx = self._segment_at(px)
                 if idx >= 0:
                     self.segment_toggled.emit(idx)
-                else:
-                    ms = max(0.0, self._px_to_ms(px))
-                    self.seek_requested.emit(ms / 1000.0)
+            else:
+                # Click on ruler or waveform → seek playhead
+                ms = max(0.0, self._px_to_ms(px))
+                self.seek_requested.emit(ms / 1000.0)
 
     def mouseMoveEvent(self, event):
+        if self._panning:
+            dx = event.position().x() - self._pan_start_x
+            self._scroll_px = max(0, int(self._pan_start_scroll - dx))
+            self.update()
+            return
         self.setCursor(Qt.CursorShape.SplitHCursor if self._cut_mode
                        else Qt.CursorShape.PointingHandCursor)
 
     def mouseReleaseEvent(self, event):
-        pass
+        if event.button() == Qt.MouseButton.MiddleButton and self._panning:
+            self._panning = False
+            self.setCursor(Qt.CursorShape.SplitHCursor if self._cut_mode
+                           else Qt.CursorShape.PointingHandCursor)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and self._cut_mode:
             self.cut_mode_exit_requested.emit()
+        # Arrow keys for horizontal scroll
+        if event.key() == Qt.Key.Key_Left:
+            self._scroll_px = max(0, self._scroll_px - 60)
+            self.update()
+        elif event.key() == Qt.Key.Key_Right:
+            self._scroll_px += 60
+            self.update()
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):
+        mods = event.modifiers()
         delta = event.angleDelta().y()
-        factor = 1.15 if delta > 0 else 0.87
-        self._zoom = max(0.01, min(self._zoom * factor, 50.0))
-        self.update()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            # Shift + scroll = pan horizontally
+            self._scroll_px = max(0, self._scroll_px - delta)
+            self.update()
+        else:
+            # Normal scroll = zoom (centered on mouse)
+            old_ms = self._px_to_ms(event.position().x())
+            factor = 1.15 if delta > 0 else 0.87
+            self._zoom = max(0.01, min(self._zoom * factor, 50.0))
+            # Re-center on mouse position
+            new_px = old_ms * self._zoom + 10
+            self._scroll_px = max(0, int(new_px - event.position().x()))
+            self.update()
 
     def resizeEvent(self, event):
         if self.duration_ms > 0:
             self._zoom = max(0.05, (self.width() - 20) / max(self.duration_ms, 1))
+            self._scroll_px = 0
         self.update()
 
     def _pick_step(self):
@@ -900,7 +938,11 @@ class RightPanel(QWidget):
         self._tab_subs = self._build_tab_subs()
         self._tabs.addTab(self._tab_subs, "💬  Sous-titres")
 
-        # Tab 3 — Export
+        # Tab 3 — Musique de fond
+        self._tab_music = self._build_tab_music()
+        self._tabs.addTab(self._tab_music, "🎵  Musique")
+
+        # Tab 4 — Export
         self._tab_export = self._build_tab_export()
         self._tabs.addTab(self._tab_export, "🚀  Export")
 
@@ -1002,7 +1044,7 @@ class RightPanel(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(8, 8, 8, 8)
 
-        lbl = QLabel("Format : START | END | MOT   (temps en secondes)")
+        lbl = QLabel("Format : START | END | PHRASE   (temps en secondes, éditable)")
         lbl.setStyleSheet("color: #9896b8; font-size: 11px; padding: 2px;")
         v.addWidget(lbl)
 
@@ -1027,9 +1069,37 @@ class RightPanel(QWidget):
         self._tabs.setCurrentIndex(1)
 
     def _reload_subs(self):
-        if hasattr(self, "_txt_path") and self._txt_path and os.path.exists(self._txt_path):
-            with open(self._txt_path, "r", encoding="utf-8") as f:
-                self._sub_editor.setPlainText(f.read())
+        """Charge le fichier mot-par-mot et affiche regroupé par phrases."""
+        if not (hasattr(self, "_txt_path") and self._txt_path and os.path.exists(self._txt_path)):
+            return
+        # Lire les mots bruts
+        words = []
+        with open(self._txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    try:
+                        words.append({
+                            "start": float(parts[0].strip()),
+                            "end":   float(parts[1].strip()),
+                            "word":  parts[2].strip(),
+                        })
+                    except ValueError:
+                        pass
+        # Regrouper par phrases de 8 mots max
+        lines = ["# START | END | PHRASE"]
+        max_w = 8
+        i = 0
+        while i < len(words):
+            group = words[i: i + max_w]
+            if not group:
+                break
+            phrase = " ".join(w["word"] for w in group)
+            lines.append(f"{group[0]['start']:.2f} | {group[-1]['end']:.2f} | {phrase}")
+            i += max_w
+        self._sub_editor.setPlainText("\n".join(lines))
 
     def _save_subs(self):
         if hasattr(self, "_txt_path") and self._txt_path:
@@ -1038,6 +1108,83 @@ class RightPanel(QWidget):
 
     def get_txt_path(self):
         return getattr(self, "_txt_path", None)
+
+    # ── Tab Musique de fond ────────────────────────────────────────────────────
+
+    def _build_tab_music(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
+
+        lbl = QLabel("Musique de fond — placez vos fichiers audio dans le dossier 'music/'")
+        lbl.setStyleSheet("color: #9896b8; font-size: 11px; padding: 2px;")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+
+        self._music_list = QListWidget()
+        self._music_list.setStyleSheet("""
+            QListWidget { background: #1a1928; border: 1px solid #242336; }
+            QListWidget::item { padding: 4px 6px; }
+            QListWidget::item:selected { background: #8A2BE2; }
+        """)
+        v.addWidget(self._music_list, 1)
+
+        # Volume slider
+        vol_row = QHBoxLayout()
+        vol_row.addWidget(QLabel("🔊 Volume :"))
+        self._music_vol = QSlider(Qt.Orientation.Horizontal)
+        self._music_vol.setRange(0, 100)
+        self._music_vol.setValue(15)
+        self._music_vol.setFixedWidth(120)
+        self._music_vol_lbl = QLabel("15%")
+        self._music_vol_lbl.setStyleSheet("color: #a855f7; min-width: 40px;")
+        self._music_vol.valueChanged.connect(
+            lambda v: self._music_vol_lbl.setText(f"{v}%")
+        )
+        vol_row.addWidget(self._music_vol)
+        vol_row.addWidget(self._music_vol_lbl)
+        vol_row.addStretch()
+        v.addLayout(vol_row)
+
+        # Buttons
+        row = QHBoxLayout()
+        self._btn_refresh_music = btn("🔄  Rafraîchir", "#242336", 120)
+        self._btn_refresh_music.clicked.connect(self._refresh_music_list)
+        self._btn_no_music = btn("🚫  Aucune musique", "#242336", 140)
+        self._btn_no_music.clicked.connect(lambda: self._music_list.clearSelection())
+        row.addWidget(self._btn_refresh_music)
+        row.addWidget(self._btn_no_music)
+        row.addStretch()
+        v.addLayout(row)
+
+        # Créer le dossier music/ s'il n'existe pas
+        self._music_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
+        os.makedirs(self._music_dir, exist_ok=True)
+        self._refresh_music_list()
+        return w
+
+    def _refresh_music_list(self):
+        self._music_list.clear()
+        exts = (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a")
+        if os.path.isdir(self._music_dir):
+            files = sorted(f for f in os.listdir(self._music_dir)
+                           if f.lower().endswith(exts))
+            for f in files:
+                self._music_list.addItem(f)
+        if self._music_list.count() == 0:
+            self._music_list.addItem("(Aucun fichier — déposez vos musiques dans music/)")
+
+    def get_music_path(self):
+        """Retourne le chemin du fichier musique sélectionné, ou None."""
+        items = self._music_list.selectedItems()
+        if not items or items[0].text().startswith("("):
+            return None
+        return os.path.join(self._music_dir, items[0].text())
+
+    def get_music_volume(self):
+        """Retourne le volume de la musique de fond (0.0–1.0)."""
+        return self._music_vol.value() / 100.0
 
     # ── Tab Export ────────────────────────────────────────────────────────────
 
@@ -1211,9 +1358,6 @@ class VibeSlicer(QMainWindow):
         self._right = RightPanel()
         self._right.decision_changed.connect(self._on_decision_changed)
         self._right._btn_export.clicked.connect(self._start_export)
-        self._right._silence_list.currentRowChanged.connect(
-            lambda row: self._btn_del_zone.setEnabled(row >= 0 and self._timeline.duration_ms > 0)
-        )
         top_split.addWidget(self._right)
 
         top_split.setSizes([720, 380])
@@ -1229,7 +1373,7 @@ class VibeSlicer(QMainWindow):
         tl_v.setSpacing(2)
 
         tl_header = QHBoxLayout()
-        tl_lbl = QLabel("TIMELINE  —  scroll = zoom  |  clic segment = couper/garder  |  Mode Coupe : clic = razor cut")
+        tl_lbl = QLabel("TIMELINE  —  scroll = zoom  |  Shift+scroll = naviguer  |  clic = déplacer tête de lecture  |  clic segment = couper/garder")
         tl_lbl.setStyleSheet("color: #6b6890; font-size: 11px;")
         tl_header.addWidget(tl_lbl)
         tl_header.addStretch()
@@ -1260,40 +1404,6 @@ class VibeSlicer(QMainWindow):
         """)
         self._btn_cut_mode.toggled.connect(self._on_toggle_cut_mode)
         tl_header.addWidget(self._btn_cut_mode)
-
-        # In/Out manual cut buttons
-        self._btn_in  = QPushButton("[ In")
-        self._btn_out = QPushButton("Out ]")
-        self._btn_add = QPushButton("➕ Ajouter zone")
-        self._btn_del_zone = QPushButton("✖ Supprimer zone sélectionnée")
-        for b, tip in [
-            (self._btn_in,  "Marquer le début de la zone à couper (position playhead)"),
-            (self._btn_out, "Marquer la fin de la zone à couper (position playhead)"),
-            (self._btn_add, "Ajouter la zone In→Out comme coupe manuelle"),
-            (self._btn_del_zone, "Supprimer la zone sélectionnée dans la liste"),
-        ]:
-            b.setFixedHeight(24)
-            b.setToolTip(tip)
-            b.setStyleSheet("""
-                QPushButton { background: #242336; color: #9896b8; border: none;
-                              border-radius: 3px; font-size: 11px; padding: 0 8px; }
-                QPushButton:hover { background: #3a3858; color: white; }
-                QPushButton:disabled { color: #3a3858; }
-            """)
-        self._btn_in.setStyleSheet(self._btn_in.styleSheet().replace("#9896b8", "#3b82f6"))
-        self._btn_out.setStyleSheet(self._btn_out.styleSheet().replace("#9896b8", "#f97316"))
-        self._btn_add.setStyleSheet(self._btn_add.styleSheet().replace("#9896b8", "#22c55e"))
-        self._btn_del_zone.setStyleSheet(self._btn_del_zone.styleSheet().replace("#9896b8", "#ef4444"))
-        self._btn_add.setEnabled(False)
-        self._btn_del_zone.setEnabled(False)
-        self._btn_in.clicked.connect(self._on_set_in)
-        self._btn_out.clicked.connect(self._on_set_out)
-        self._btn_add.clicked.connect(self._on_add_manual_zone)
-        self._btn_del_zone.clicked.connect(self._on_delete_selected_zone)
-        tl_header.addWidget(self._btn_in)
-        tl_header.addWidget(self._btn_out)
-        tl_header.addWidget(self._btn_add)
-        tl_header.addWidget(self._btn_del_zone)
         tl_v.addLayout(tl_header)
 
         self._timeline = TimelineWidget()
@@ -1354,9 +1464,9 @@ class VibeSlicer(QMainWindow):
         h.addWidget(QLabel("Seuil silence :"))
         self._thresh_sl = QSlider(Qt.Orientation.Horizontal)
         self._thresh_sl.setRange(-60, -10)
-        self._thresh_sl.setValue(-35)
+        self._thresh_sl.setValue(-54)
         self._thresh_sl.setFixedWidth(120)
-        self._thresh_lbl = QLabel("-35 dB")
+        self._thresh_lbl = QLabel("-54 dB")
         self._thresh_lbl.setStyleSheet("color: #a855f7; min-width: 50px;")
         self._thresh_sl.valueChanged.connect(lambda v: self._thresh_lbl.setText(f"{v} dB"))
         h.addWidget(self._thresh_sl)
@@ -1708,7 +1818,13 @@ class VibeSlicer(QMainWindow):
         self._right.set_export_progress(0.0, "Export en cours...")
         self._statusbar.showMessage("Export de la vidéo finale...")
 
-        self._worker_export = ExportWorker(self._raw_cut_path, self._txt_path, out_path)
+        music_path = self._right.get_music_path()
+        music_vol  = self._right.get_music_volume()
+
+        self._worker_export = ExportWorker(
+            self._raw_cut_path, self._txt_path, out_path,
+            music_path=music_path, music_volume=music_vol,
+        )
         self._worker_export.progress.connect(self._on_export_progress)
         self._worker_export.finished.connect(self._on_export_done)
         self._worker_export.error.connect(self._on_export_error)
