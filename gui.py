@@ -7,8 +7,55 @@ import sys
 import time
 import threading
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ÉTAPE 0 — PATH Qt6/bin AVANT TOUT IMPORT PyQt6
+#
+# Qt charge les plugins multimedia (windowsmediaplugin.dll) au premier import
+# de PyQt6.QtMultimedia. Ces plugins ont besoin de Qt6Multimedia.dll etc.
+# qui sont dans PyQt6/Qt6/bin. Si ce dossier n'est pas dans PATH à ce
+# moment précis, Qt imprime "No backends found" et abandonne.
+# Ce bloc DOIT être exécuté avant "from PyQt6.QtMultimedia import ...".
+# ══════════════════════════════════════════════════════════════════════════════
+def _setup_qt6_path():
+    """Ajoute PyQt6/Qt6/bin au PATH avant que Qt ne charge ses plugins."""
+    import site as _s
+    candidates = []
+    try:
+        candidates += _s.getsitepackages()
+    except AttributeError:
+        pass
+    try:
+        candidates.append(_s.getusersitepackages())
+    except AttributeError:
+        pass
+
+    for sp in candidates:
+        qt6_bin  = os.path.join(sp, "PyQt6", "Qt6", "bin")
+        plug_dir = os.path.join(sp, "PyQt6", "Qt6", "plugins", "multimedia")
+        if os.path.isdir(qt6_bin):
+            cur = os.environ.get("PATH", "")
+            if qt6_bin.lower() not in cur.lower():
+                os.environ["PATH"] = qt6_bin + os.pathsep + cur
+                print(f"[VS] Qt6/bin ajouté au PATH : {qt6_bin}")
+            else:
+                print(f"[VS] Qt6/bin déjà dans PATH : {qt6_bin}")
+            # Log des plugins multimedia présents
+            if os.path.isdir(plug_dir):
+                dlls = os.listdir(plug_dir)
+                print(f"[VS] Plugins multimedia ({len(dlls)}) : {dlls}")
+            else:
+                print(f"[VS] ⚠ Aucun dossier plugins/multimedia dans : {sp}")
+            return qt6_bin
+    print("[VS] ⚠ PyQt6/Qt6/bin introuvable — multimedia risque d'échouer")
+    return None
+
+_qt6_bin = _setup_qt6_path()
+
+# Supprimer les avertissements Qt multimedia AVANT le chargement du module
+# (QT_LOGGING_RULES doit être positionné avant QApplication ET avant import)
+os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia*=false")
+
 # ── Vérification précoce des dépendances critiques ────────────────────────────
-# On fait ça AVANT d'importer PyQt6, pour pouvoir afficher une vraie erreur.
 def _check_deps():
     missing = []
     try:
@@ -52,11 +99,16 @@ from PyQt6.QtGui import (
     QPixmap, QImage, QLinearGradient, QPalette, QIcon,
     QAction,
 )
+
+# ── Import QtMultimedia (Path Qt6/bin déjà en place ci-dessus) ───────────────
+print("[VS] Chargement QtMultimedia...")
 try:
     from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
     from PyQt6.QtMultimediaWidgets import QVideoWidget
+    print("[VS] QtMultimedia importé avec succès.")
     QMEDIA_OK = True
-except ImportError:
+except ImportError as _qm_err:
+    print(f"[VS] ⚠ QtMultimedia import échoué : {_qm_err}")
     QMEDIA_OK = False
 
 try:
@@ -598,9 +650,11 @@ class VideoPlayerWidget(QWidget):
         layout.setSpacing(4)
 
         _media_ready = False
+        print(f"[VS] VideoPlayerWidget init — QMEDIA_OK={QMEDIA_OK}")
         if QMEDIA_OK:
             try:
                 # ── QVideoWidget : rendu matériel natif ───────────────────────
+                print("[VS] Création QVideoWidget...")
                 self._video_widget = QVideoWidget()
                 self._video_widget.setMinimumSize(480, 270)
                 self._video_widget.setSizePolicy(
@@ -609,10 +663,16 @@ class VideoPlayerWidget(QWidget):
                 layout.addWidget(self._video_widget, 1)
 
                 # ── QMediaPlayer : A/V sync géré nativement par Qt ───────────
+                print("[VS] Création QMediaPlayer...")
                 self._media = QMediaPlayer()
+                err = self._media.error()
+                err_str = self._media.errorString()
+                print(f"[VS] QMediaPlayer error après init : {err} | '{err_str}'")
+
                 # Vérifier que le backend est vraiment disponible
-                if self._media.error() == QMediaPlayer.Error.ResourceError:
-                    raise RuntimeError("Backend QtMultimedia non disponible")
+                if err == QMediaPlayer.Error.ResourceError:
+                    raise RuntimeError(f"Backend QtMultimedia non disponible : {err_str}")
+
                 self._audio_out = QAudioOutput()
                 self._audio_out.setVolume(1.0)
                 self._media.setAudioOutput(self._audio_out)
@@ -622,7 +682,9 @@ class VideoPlayerWidget(QWidget):
                 self._media.durationChanged.connect(self._on_duration_changed)
                 self._media.playbackStateChanged.connect(self._on_state_changed)
                 _media_ready = True
-            except Exception:
+                print("[VS] ✅ QMediaPlayer opérationnel.")
+            except Exception as _me:
+                print(f"[VS] ❌ QMediaPlayer échoué : {_me}")
                 self._media = None
                 # Le widget vidéo a peut-être été ajouté — on le retire proprement
                 try:
@@ -1640,34 +1702,10 @@ if __name__ == "__main__":
     # Se placer dans le dossier du script (chemins relatifs input/output/assets)
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-    # ── Ajouter PyQt6/Qt6/bin au PATH pour que le plugin multimedia
-    #    (qwindowsmediafoundation.dll) trouve ses dépendances Qt au démarrage.
-    #    Sans ça, Qt imprime "No QtMultimedia backends found" et le player
-    #    reste en mode fallback. ──────────────────────────────────────────────
-    try:
-        import site as _site
-        _search_dirs = []
-        try:
-            _search_dirs += _site.getsitepackages()
-        except AttributeError:
-            pass
-        try:
-            _search_dirs.append(_site.getusersitepackages())
-        except AttributeError:
-            pass
-        for _sp in _search_dirs:
-            _qt6_bin = os.path.join(_sp, "PyQt6", "Qt6", "bin")
-            if os.path.isdir(_qt6_bin):
-                _cur_path = os.environ.get("PATH", "")
-                if _qt6_bin.lower() not in _cur_path.lower():
-                    os.environ["PATH"] = _qt6_bin + os.pathsep + _cur_path
-                break
-    except Exception:
-        pass
-
-    # Supprimer les messages Qt multimedia si le backend reste absent
-    # (évite les 3 lignes de bruit dans la console)
-    os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia*=false")
+    # Qt6/bin et QT_LOGGING_RULES sont configurés en haut du fichier,
+    # avant tout import QtMultimedia — le timing est désormais correct.
+    print(f"[VS] Qt6/bin utilisé : {_qt6_bin or 'non trouvé'}")
+    print(f"[VS] QMEDIA_OK = {QMEDIA_OK}")
 
     app = QApplication(sys.argv)
     app.setApplicationName("VibeSlicer Pro")
