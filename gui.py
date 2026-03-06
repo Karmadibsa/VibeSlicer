@@ -8,6 +8,27 @@ import time
 import threading
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ÉTAPE -1 — PRÉ-CHARGEMENT TORCH / CTRANSLATE2 AVANT PyQt6
+#
+# Sur Windows, QApplication modifie l'ordre de recherche DLL du processus.
+# Si torch est importé APRÈS Qt, c10.dll ne peut plus trouver ses dépendances
+# → WinError 1114 "DLL initialization routine failed".
+# La solution : charger torch et ctranslate2 AVANT tout import PyQt6
+# pour que leurs DLLs soient déjà verrouillées en mémoire.
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    import torch
+    print(f"[VS] torch pré-chargé : {torch.__version__}")
+except ImportError:
+    print("[VS] ⚠ torch non installé — transcription Whisper indisponible")
+
+try:
+    import ctranslate2
+    print(f"[VS] ctranslate2 pré-chargé : {ctranslate2.__version__}")
+except ImportError:
+    print("[VS] ⚠ ctranslate2 non installé — transcription Whisper indisponible")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ÉTAPE 0 — PATH Qt6/bin AVANT TOUT IMPORT PyQt6
 #
 # Qt charge les plugins multimedia (windowsmediaplugin.dll) au premier import
