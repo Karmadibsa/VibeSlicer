@@ -486,7 +486,9 @@ def burn_subtitles(video_path: str, words_data: list, output_path: str,
 
     _p(0.0, "Génération du fichier SRT pour gravure...")
     srt_path = os.path.join(CONFIG["TEMP_DIR"], "burn_subs.srt")
-    _write_srt_grouped(words_data, srt_path)
+    # max_words=1 car les données arrivent déjà regroupées par phrases
+    # depuis l'éditeur GUI — chaque entrée = un sous-titre complet.
+    _write_srt_grouped(words_data, srt_path, max_words=1)
 
     # Échappement du chemin pour le filtre FFmpeg (Windows)
     srt_esc = srt_path.replace("\\", "/").replace(":", "\\:")
