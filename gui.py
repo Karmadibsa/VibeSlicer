@@ -125,6 +125,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QVBoxLayout, QHBoxLayout, QFileDialog, QListWidget,
     QListWidgetItem, QTabWidget, QPlainTextEdit, QProgressBar, QStatusBar,
     QToolBar, QSizePolicy, QFrame, QScrollArea, QMessageBox,
+    QGraphicsDropShadowEffect, QLineEdit, QScrollBar
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QRect, QPoint, QSize, QUrl,
