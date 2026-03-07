@@ -37,14 +37,14 @@ CONFIG = {
     "SUB_STYLE": (
         "Fontname=Poppins,"
         "Fontsize=22,"
-        "PrimaryColour=&HFFFFFF,"
-        "OutlineColour=&HE22B8A,"
+        "PrimaryColour=&HEDB58A,"   # Violet #8ab5ed in BGR
+        "OutlineColour=&H000000,"   # Noir
         "BorderStyle=1,"
         "Outline=3,"
         "Alignment=2,"
-        "MarginV=40"
+        "MarginV={margin_v}"        # Dynamique
     ),
-    "MAX_WORDS_PER_SUB": 8,
+    "MAX_WORDS_PER_SUB": 5,         # Limité à ~1 ligne
 }
 
 for d in [CONFIG["INPUT_DIR"], CONFIG["OUTPUT_DIR"], CONFIG["ASSETS_DIR"], CONFIG["TEMP_DIR"]]:
@@ -460,7 +460,8 @@ def load_subs_from_file(txt_path: str) -> list:
 
 def burn_subtitles(video_path: str, words_data: list, output_path: str,
                    progress_callback=None,
-                   music_path: str = None, music_volume: float = 0.15) -> str:
+                   music_path: str = None, music_volume: float = 0.15,
+                   intro_title: str = None, margin_v: int = 40) -> str:
     """
     Phase 3 : Grave les sous-titres sur la vidéo via FFmpeg.
     Utilise le filtre 'subtitles' natif FFmpeg — zéro MoviePy, zéro Pillow.
@@ -474,9 +475,13 @@ def burn_subtitles(video_path: str, words_data: list, output_path: str,
     output_path : str
         Chemin du fichier de sortie final.
     music_path : str, optional
-        Chemin vers un fichier audio pour la musique de fond.
+        Chemin vers un audio pour la musique de fond.
     music_volume : float
-        Volume de la musique de fond (0.0–1.0). Défaut 0.15.
+        Volume (0.0-1.0).
+    intro_title : str, optional
+        Texte à afficher au début (flou + titre sur 2 secondes).
+    margin_v : int
+        Hauteur des sous-titres (marge basse en pixels).
     """
     def _p(p, msg):
         if progress_callback:
@@ -492,8 +497,21 @@ def burn_subtitles(video_path: str, words_data: list, output_path: str,
 
     # Échappement du chemin pour le filtre FFmpeg (Windows)
     srt_esc = srt_path.replace("\\", "/").replace(":", "\\:")
-    sub_style = CONFIG.get("SUB_STYLE", "Fontsize=22,PrimaryColour=&HFFFFFF,Outline=3")
+    sub_style = CONFIG["SUB_STYLE"].replace("{margin_v}", str(margin_v))
     vf_chain = f"subtitles='{srt_esc}':force_style='{sub_style}'"
+
+    # Intro (flou + titre texte)
+    if intro_title and intro_title.strip():
+        _p(0.05, f"Ajout de l'intro : '{intro_title}'...")
+        title_esc = intro_title.replace("'", "\\'").replace(":", "\\:")
+        intro_vf = (
+            f"boxblur=20:5:enable='between(t,0,2.5)',"
+            f"drawtext=text='{title_esc}':fontcolor=white:fontsize=90:"
+            f"font='Poppins':x=(w-text_w)/2:y=(h-text_h)/2:"
+            f"shadowcolor=black:shadowx=4:shadowy=4:"
+            f"enable='between(t,0,2.5)'"
+        )
+        vf_chain = f"{intro_vf},{vf_chain}"
 
     # Détection NVENC
     _p(0.1, "Détection du codec disponible...")
